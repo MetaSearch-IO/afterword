@@ -1,0 +1,10 @@
+Mode: built-in image_gen (generation followed by one refinement).
+Deliverable: afterword-icon-v1.png; 1254 x 1254 pixels, RGBA.
+Status: approved source asset for the bundled Afterword.icns icon.
+Packaging: scripts/build-icon.sh exports standard macOS icon sizes without redesigning the source image.
+
+Generation prompt:
+Use case: logo-brand. Create a single finished macOS application icon for Afterword, a private, local meeting recorder that turns conversations into readable transcripts and useful notes. Square 1024 by 1024 composition. The central symbol should unify two gently overlapping speech-note shapes: conversation becoming a tidy written note, with only two or three bold horizontal transcript strokes. Make one distinctive, simple silhouette that remains legible at small Dock sizes. Give it the polish of an excellent native Mac productivity app: a softly rounded square tile, restrained color, strong contrast, subtle dimensional ceramic or enamel surfaces, soft controlled lighting, crisp contours, balanced generous interior space. Face-on orthographic view. Center the tile with consistent modest outer padding. Transparent pixels outside the rounded tile, including its corners; the tile itself is opaque. No words, no letters, no wordmark, no microphone, no robot, no sparkles, no busy waveform, no tiny decorative detail, no mockup, no device frame, no contact sheet, no watermark. Output the actual usable icon asset.
+
+Refinement prompt:
+Refine only the outer transparency of this Afterword macOS app icon. Preserve the blue rounded-square tile, the overlapping white speech bubble and folded note, their three transcript strokes, exact composition, proportions, materials, colors, lighting and interior design. Remove every stray cyan or blue speck outside the tile, especially near the top canvas edge and below the bottom edge. Give the tile a clean, smoothly antialiased outer silhouette with truly transparent pixels outside it. No exterior glow or exterior cast shadow. Keep the same square canvas and padding. Do not add text or change the symbol.

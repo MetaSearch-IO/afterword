@@ -1,0 +1,87 @@
+--- a/examples/cli/cli.cpp
++++ b/examples/cli/cli.cpp
+@@ -8,6 +8,7 @@
+ #include <algorithm>
+ #include <fstream>
+ #include <cstdio>
++#include <cstdlib>
+ #include <string>
+ #include <thread>
+ #include <vector>
+@@ -1290,6 +1291,12 @@
+                 wparams.progress_callback_user_data = &user_data;
+             }
+ 
++            const char * reuse = std::getenv("AFTERWORD_EXPERIMENTAL_ENCODER_REUSE");
++            const bool experimental_encoder_reuse = reuse && strcmp(reuse, "1") == 0;
++            if (experimental_encoder_reuse) {
++                fprintf(stderr, "afterword_encoder_reuse: experimental CLI omits inert demo callbacks\n");
++            }
++
+             // examples for abort mechanism
+             // in examples below, we do not abort the processing, but we could if the flag is set to true
+ 
+@@ -1297,7 +1304,7 @@
+             {
+                 static bool is_aborted = false; // NOTE: this should be atomic to avoid data race
+ 
+-                wparams.encoder_begin_callback = [](struct whisper_context * /*ctx*/, struct whisper_state * /*state*/, void * user_data) {
++                if (!experimental_encoder_reuse) wparams.encoder_begin_callback = [](struct whisper_context * /*ctx*/, struct whisper_state * /*state*/, void * user_data) {
+                     bool is_aborted = *(bool*)user_data;
+                     return !is_aborted;
+                 };
+@@ -1308,7 +1315,7 @@
+             {
+                 static bool is_aborted = false; // NOTE: this should be atomic to avoid data race
+ 
+-                wparams.abort_callback = [](void * user_data) {
++                if (!experimental_encoder_reuse) wparams.abort_callback = [](void * user_data) {
+                     bool is_aborted = *(bool*)user_data;
+                     return is_aborted;
+                 };
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -27,6 +27,7 @@
+ #include <climits>
+ #include <cstdarg>
+ #include <cstdio>
++#include <cstdlib>
+ #include <cstring>
+ #include <fstream>
+ #include <functional>
+@@ -6934,6 +6935,8 @@
+         }
+     }
+ 
++    bool reuse_auto_encoder = false;
++
+     // auto-detect language if not specified
+     if (params.language == nullptr || strlen(params.language) == 0 || strcmp(params.language, "auto") == 0 || params.detect_language) {
+         std::vector<float> probs(whisper_lang_max_id() + 1, 0.0f);
+@@ -6957,6 +6960,15 @@
+         if (params.detect_language) {
+             return 0;
+         }
++
++        const char * reuse = std::getenv("AFTERWORD_EXPERIMENTAL_ENCODER_REUSE");
++        // Experimental: callbacks may replace mel or cross-KV; only reuse a native first window.
++        reuse_auto_encoder = reuse && strcmp(reuse, "1") == 0 &&
++            n_samples > 0 && params.offset_ms == 0 && params.audio_ctx == 0 && state->exp_n_audio_ctx == 0 &&
++            ctx->params.use_gpu && !ctx->params.dtw_token_timestamps && !whisper_encode_external(*state) &&
++            !params.encoder_begin_callback && !params.progress_callback && !params.abort_callback &&
++            !state->backends.empty() && strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(
++                ggml_backend_get_device(state->backends.front()))), "MTL") == 0;
+     }
+ 
+     if (params.token_timestamps) {
+@@ -7157,7 +7169,9 @@
+         }
+ 
+         // encode audio features starting at offset seek
+-        if (!whisper_encode_internal(*ctx, *state, seek, params.n_threads, params.abort_callback, params.abort_callback_user_data)) {
++        const bool reuse_first_window = reuse_auto_encoder && seek == 0;
++        reuse_auto_encoder = false;
++        if (!reuse_first_window && !whisper_encode_internal(*ctx, *state, seek, params.n_threads, params.abort_callback, params.abort_callback_user_data)) {
+             WHISPER_LOG_ERROR("%s: failed to encode\n", __func__);
+             return -6;
+         }

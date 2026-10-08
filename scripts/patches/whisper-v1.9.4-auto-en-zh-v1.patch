@@ -1,0 +1,42 @@
+--- /dev/null
++++ b/src/afterword-language-policy.h
+@@ -0,0 +1,9 @@
++#pragma once
++
++static inline int afterword_select_auto_language(
++        int detected, const float * probabilities, int english, int chinese, bool restricted) {
++    if (!restricted || detected == english || detected == chinese) {
++        return detected;
++    }
++    return probabilities[chinese] > probabilities[english] ? chinese : english;
++}
+--- a/src/whisper.cpp
++++ b/src/whisper.cpp
+@@ -1,5 +1,6 @@
+ #include "whisper.h"
+ #include "whisper-arch.h"
++#include "afterword-language-policy.h"
+ 
+ #include "ggml.h"
+ #include "ggml-cpp.h"
+@@ -6949,11 +6950,19 @@
+             }
+         }
+ 
+-        const auto lang_id = whisper_lang_auto_detect_with_state(ctx, state, 0, params.n_threads, probs.data());
++        auto lang_id = whisper_lang_auto_detect_with_state(ctx, state, 0, params.n_threads, probs.data());
+         if (lang_id < 0) {
+             WHISPER_LOG_ERROR("%s: failed to auto-detect language\n", __func__);
+             return -3;
+         }
++        const char * policy = std::getenv("AFTERWORD_AUTO_LANGUAGE_EN_ZH");
++        const bool automatic = params.language == nullptr || strlen(params.language) == 0 || strcmp(params.language, "auto") == 0;
++        const int selected = afterword_select_auto_language(lang_id, probs.data(), whisper_lang_id("en"), whisper_lang_id("zh"),
++            automatic && policy && strcmp(policy, "1") == 0);
++        if (selected != lang_id) {
++            WHISPER_LOG_INFO("afterword_language_policy: %s -> %s\n", whisper_lang_str(lang_id), whisper_lang_str(selected));
++        }
++        lang_id = selected;
+         state->lang_id = lang_id;
+         params.language = whisper_lang_str(lang_id);
+ 

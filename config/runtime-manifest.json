@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "native": {
+    "whisper": {
+      "repository": "https://github.com/ggml-org/whisper.cpp.git",
+      "tag": "v1.9.4",
+      "commit": "927cfce34f31707e17f2bff35c349632fb9e2c3a",
+      "targets": ["whisper-cli", "whisper-vad-speech-segments"],
+      "experimental_encoder_reuse": {
+        "enabled": true,
+        "base_commit": "927cfce34f31707e17f2bff35c349632fb9e2c3a",
+        "path": "scripts/patches/whisper-v1.9.4-encoder-reuse-v1.patch",
+        "sha256": "01ba7b18aa92feeeaa65cffb3f8017e1f8184500b47ab0c3713200c927e4301f"
+      },
+      "automatic_language_policy": {
+        "enabled": true,
+        "base_commit": "927cfce34f31707e17f2bff35c349632fb9e2c3a",
+        "path": "scripts/patches/whisper-v1.9.4-auto-en-zh-v1.patch",
+        "sha256": "449c97c0f15106e9e4e87f9e4f493e30d6334d2cb3a2f1d59e74d0f822b20841"
+      }
+    },
+    "llama": {
+      "repository": "https://github.com/ggml-org/llama.cpp.git",
+      "tag": "v0.5.0",
+      "commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+      "targets": ["llama-completion", "llama-tokenize"],
+      "summary_batch": {
+        "enabled": true,
+        "base_commit": "7fe450e19305b828c199d602c23a8337aaa1f03b",
+        "source": "scripts/native/summary-batch.cpp",
+        "sha256": "702955b897fe92e9c5727ec22eb0a681539872801807043db77c8e78eef445f0"
+      }
+    }
+  },
+  "models": {
+    "vad": {
+      "repository": "ggml-org/whisper-vad",
+      "revision": "9ffd54a1e1ee413ddf265af9913beaf518d1639b",
+      "files": [
+        {
+          "name": "ggml-silero-v6.2.0.bin",
+          "size": 885098,
+          "sha256": "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
+        }
+      ]
+    },
+    "asr": {
+      "repository": "ggerganov/whisper.cpp",
+      "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "files": [
+        {
+          "name": "ggml-large-v3-turbo-q8_0.bin",
+          "size": 874188075,
+          "sha256": "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1"
+        }
+      ]
+    },
+    "summary": {
+      "repository": "Qwen/Qwen2.5-7B-Instruct-GGUF",
+      "revision": "bb5d59e06d9551d752d08b292a50eb208b07ab1f",
+      "files": [
+        {
+          "name": "qwen2.5-7b-instruct-q4_k_m-00001-of-00002.gguf",
+          "size": 3993201344,
+          "sha256": "dfce12e3862a5283ccfb88221b48480e58745165de856439950d0f22590580db"
+        },
+        {
+          "name": "qwen2.5-7b-instruct-q4_k_m-00002-of-00002.gguf",
+          "size": 689872288,
+          "sha256": "539cf93f78e887edea1c04e2d7d8cdaca9d01dae9c9025bcb8accbe29df3d72a"
+        }
+      ]
+    },
+    "diarization": {
+      "repository": "pyannote/speaker-diarization-community-1",
+      "revision": "3533c8cf8e369892e6b79ff1bf80f7b0286a54ee",
+      "gated": true
+    }
+  },
+  "python": {
+    "version": "3.12.11",
+    "group": "inference",
+    "pyannote_audio": "4.0.7"
+  }
+}
