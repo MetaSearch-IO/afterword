@@ -73,6 +73,8 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
     public var captureError: String?
     public var intervals: [CaptureInterval] = []
     public var chunks: [ChunkDescriptor] = []
+    public var audioRemovalStartedAt: String?
+    public var audioRemovedAt: String?
     public var processingStatus: String = "idle"
     public var processingStage: String?
     public var processingError: String?
@@ -102,11 +104,16 @@ public struct Meeting: Codable, Identifiable, Equatable, Sendable {
         return total
     }
 
+    public var audioUnavailable: Bool {
+        audioRemovalStartedAt != nil || audioRemovedAt != nil
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, title, intervals, chunks
         case asrLanguage = "asr_language"
         case schemaVersion = "schema_version", startedAt = "started_at"
         case captureState = "capture_state", captureError = "capture_error"
+        case audioRemovalStartedAt = "audio_removal_started_at", audioRemovedAt = "audio_removed_at"
         case processingStatus = "processing_status", processingStage = "processing_stage"
         case processingError = "processing_error", activeRevisionID = "active_revision_id"
         case processingRunID = "processing_run_id", pendingRevisionID = "pending_revision_id", pendingSummaryID = "pending_summary_id"

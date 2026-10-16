@@ -48,8 +48,9 @@ final class MeetingController: ObservableObject {
     private var pendingPrivacySettingsURL: URL?
     var onCaptureFinished: ((Meeting) -> Void)?
     var canRecord: Bool { activity == .idle && processing.canReserveRecording && !isLoading && !quitting && deletingMeetingID == nil }
-    func canProcess(_ meeting: Meeting) -> Bool {
-        activity == .idle && !isLoading && !quitting && deletingMeetingID != meeting.id && processing.canProcess(meeting)
+    func canProcess(_ meeting: Meeting, summaryOnly: Bool = false) -> Bool {
+        activity == .idle && !isLoading && !quitting && deletingMeetingID != meeting.id
+            && processing.canProcess(meeting, summaryOnly: summaryOnly)
     }
     var selectedMeeting: Meeting? { meetings.first { $0.id == selectedID } }
 
@@ -99,9 +100,16 @@ final class MeetingController: ObservableObject {
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
                     let recoveryStore = MeetingStore(rootURL: root)
-                    let recovered = try recoveryStore.recover()
+                    var recovered = try recoveryStore.recover()
                     var issues = recoveryStore.recoveryIssues
                     var busy = recoveryStore.busyMeetingIDs
+                    for index in recovered.indices where recovered[index].audioRemovalStartedAt != nil {
+                        let id = recovered[index].id
+                        do {
+                            try MeetingDeletion.removeAudio(id: id, rootURL: root)
+                            recovered[index] = try recoveryStore.load(id: id)
+                        } catch { issues.append("\(id): Audio removal is incomplete. \(error.localizedDescription)") }
+                    }
                     let meetings = recovered.map { meeting in
                         if busy.contains(meeting.id) { return meeting }
                         do { return try ArtifactRecovery.recover(meeting, store: recoveryStore) }
@@ -309,6 +317,11 @@ final class MeetingController: ObservableObject {
             && !MeetingDeletion.isActive(meeting) && !processing.isMeetingBusy(meeting.id)
     }
 
+    func canDeleteMeetingAudio(_ meeting: Meeting) -> Bool {
+        canDeleteMeeting(meeting) && meeting.audioRemovedAt == nil
+            && (!meeting.chunks.isEmpty || meeting.audioRemovalStartedAt != nil)
+    }
+
     func deleteMeeting(id: String) async throws {
         let meeting = try store.load(id: id)
         guard canDeleteMeeting(meeting) else {
@@ -328,6 +341,21 @@ final class MeetingController: ObservableObject {
             reload()
             throw error
         }
+    }
+
+    func deleteMeetingAudio(id: String) async throws {
+        let meeting = try store.load(id: id)
+        guard canDeleteMeetingAudio(meeting) else {
+            throw CaptureFailure(message: "Finish recording or cancel this meeting's processing before removing its audio.")
+        }
+        deletingMeetingID = id
+        if playbackMeetingID == id { stopPlayback() }
+        let rootURL = store.rootURL
+        let task = Task.detached(priority: .utility) { try MeetingDeletion.removeAudio(id: id, rootURL: rootURL) }
+        deletionTask = task
+        defer { deletingMeetingID = nil; deletionTask = nil }
+        do { try await task.value; reload() }
+        catch { reload(); throw error }
     }
 
     func renameMeeting(id: String, title: String) async throws {
@@ -358,6 +386,7 @@ final class MeetingController: ObservableObject {
 
     func play(_ segment: TranscriptSegment, in meeting: Meeting) {
         guard activity == .idle, deletingMeetingID != meeting.id else { return }
+        guard !meeting.audioUnavailable else { message = "Saved audio was removed from this meeting."; return }
         do {
             let chunks = meeting.chunks.filter { $0.source == segment.source && $0.startUS < segment.end_us && $0.endUS > segment.start_us }
                 .sorted { $0.startUS < $1.startUS }

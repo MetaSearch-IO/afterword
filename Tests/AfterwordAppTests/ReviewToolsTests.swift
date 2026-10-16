@@ -138,6 +138,8 @@ final class ReviewToolsTests: XCTestCase {
             "discussion_points": [], "decisions": [], "action_items": [], "open_questions": []],
             "revisions/revision/summaries/summary.json")
         let saved = try ReviewExport.snapshot(store: store, meetingID: "meeting", expectedRevisionID: "revision", expectedSummaryID: "summary")
+        let summaryURL = try store.artifactURL(meetingID: "meeting", relativePath: "revisions/revision/summaries/summary.json")
+        let originalSummary = try Data(contentsOf: summaryURL)
         XCTAssertEqual(saved.names["remote"], "于虎 & Team")
         for format in ReviewExportFormat.allCases {
             for scope in ReviewExportScope.allCases {
@@ -168,7 +170,14 @@ final class ReviewToolsTests: XCTestCase {
             XCTAssertThrowsError(try ReviewExport.validateCurrent(saved, store: store), mutation)
         }
         try store.save(initial.meeting)
-        try Data("{}".utf8).write(to: store.artifactURL(meetingID: "meeting", relativePath: "revisions/revision/summaries/summary.json"))
+        try Data("{}".utf8).write(to: summaryURL)
         XCTAssertThrowsError(try ReviewExport.snapshot(store: store, meetingID: "meeting", expectedRevisionID: "revision", expectedSummaryID: "summary"))
+        try originalSummary.write(to: summaryURL)
+        try MeetingDeletion.removeAudio(id: "meeting", rootURL: store.rootURL)
+        XCTAssertEqual(try store.recover().first?.activeRevisionID, "revision")
+        XCTAssertTrue(store.recoveryIssues.isEmpty)
+        let kept = try ReviewExport.snapshot(store: store, meetingID: "meeting", expectedRevisionID: "revision", expectedSummaryID: "summary")
+        XCTAssertEqual(ReviewExport.render(kept, scope: .all, format: .plainText),
+                       ReviewExport.render(saved, scope: .all, format: .plainText))
     }
 }

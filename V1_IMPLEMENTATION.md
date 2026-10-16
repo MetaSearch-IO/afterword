@@ -831,6 +831,13 @@ deletion. The manifest remains until content removal succeeds so failures remain
 retryable. Deleting the selected meeting selects a remaining meeting or the empty
 view; deleting another meeting preserves selection. Quit waits for file removal.
 
+The meeting detail also offers **Delete Saved Audio…** after recording finishes,
+including before transcription. It keeps the meeting, transcript, notes, and
+historical chunk timeline while deleting CAF files and working WAV copies. It
+marks removal before deleting bytes, retries incomplete removal on startup, and
+blocks playback and full transcription afterward. Existing transcripts can still
+be exported or used to regenerate notes.
+
 Verification passed 151 Swift tests and 17 native UI checks using disposable
 meetings, including Cancel, external locks, symlink boundaries, partial filesystem
 failure, and correct selection. The build was installed with all four user

@@ -22,12 +22,19 @@ struct MeetingListRow: View {
         meeting.captureState == .interrupted ? "Recording interrupted" : "Recording has audio gaps"
     }
     private var statusHelp: String {
-        guard hasRecordingIssue else { return status.explanation }
+        guard hasRecordingIssue else {
+            return meeting.audioUnavailable
+                ? status.explanation + "\n\n" + (meeting.audioRemovedAt == nil ? "Audio removal is incomplete." : "Saved audio was removed; playback is unavailable.")
+                : status.explanation
+        }
         var parts = ["Processing: \(status.explanation)",
                      "Recording: \(MeetingStatus.recording(meeting).explanation)"]
         if !meeting.chunks.isEmpty { parts[1] += " The recording may be incomplete." }
         if let error = meeting.captureError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
             parts.append("Reason: \(error)")
+        }
+        if meeting.audioUnavailable {
+            parts.append(meeting.audioRemovedAt == nil ? "Audio removal is incomplete." : "Saved audio was removed; playback is unavailable.")
         }
         return parts.joined(separator: "\n\n")
     }
@@ -59,6 +66,11 @@ struct MeetingListRow: View {
             } icon: {
                 Image(systemName: status.symbol).foregroundStyle(statusColor)
             }.font(.caption).lineLimit(1)
+            if meeting.audioUnavailable {
+                Label(meeting.audioRemovedAt == nil ? "Audio removal incomplete" : "Audio removed",
+                      systemImage: "waveform.slash")
+                    .font(.caption).foregroundStyle(selectedForeground ? .white : .secondary)
+            }
             if hasRecordingIssue {
                 Button {
                     if showingStatusDetails {
@@ -109,7 +121,9 @@ struct MeetingListRow: View {
                     VStack(alignment: .leading, spacing: 5) {
                         Label(recordingIssueTitle, systemImage: "exclamationmark.triangle.fill")
                             .font(.headline)
-                        Text(meeting.captureState == .interrupted
+                        Text(meeting.audioUnavailable
+                             ? "The recording ended unexpectedly. Its saved audio was later removed. Existing transcripts and notes remain available."
+                             : meeting.captureState == .interrupted
                              ? (meeting.chunks.isEmpty ? "Recording ended unexpectedly. No audio was saved."
                                 : "Audio capture stopped unexpectedly. Part of the meeting may be missing from the saved audio, transcript, and notes.")
                              : "Microphone audio was missed briefly. Saved audio and transcripts may omit speech during those gaps.")

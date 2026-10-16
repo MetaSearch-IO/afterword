@@ -114,6 +114,10 @@ public final class MeetingStore {
                 defer { flock(descriptor, LOCK_UN) }
                 busyMeetingIDs.removeAll { $0 == directory.lastPathComponent }
                 var meeting = try load(id: directory.lastPathComponent)
+                if meeting.audioUnavailable {
+                    meetings.append(meeting)
+                    continue
+                }
                 let audioURL = try safeURL("audio", under: directory)
                 var validChunkIDs = Set<String>()
                 for chunkURL in try files.contentsOfDirectory(at: audioURL, includingPropertiesForKeys: nil) {

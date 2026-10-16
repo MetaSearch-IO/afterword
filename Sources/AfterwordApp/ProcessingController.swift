@@ -142,8 +142,10 @@ final class ProcessingController: ObservableObject {
         meetingID == id || queue.contains { $0.meetingID == id } || deferredAfterCleanup?.meetingID == id
     }
 
-    func canProcess(_ meeting: Meeting) -> Bool {
+    func canProcess(_ meeting: Meeting, summaryOnly: Bool = false) -> Bool {
         !meeting.captureState.isActive && !recordingReserved && !blocked && !shuttingDown && !isMeetingBusy(meeting.id)
+            && meeting.audioRemovalStartedAt == nil
+            && (meeting.audioRemovedAt == nil || (summaryOnly && meeting.activeRevisionID != nil))
     }
 
     var stageTitle: String {
@@ -164,7 +166,8 @@ final class ProcessingController: ObservableObject {
     }
 
     func start(_ original: Meeting, summaryOnly: Bool = false, preferred: Bool = false) {
-        guard !original.captureState.isActive, !shuttingDown, !isMeetingBusy(original.id) else { return }
+        guard !original.captureState.isActive, !shuttingDown, !isMeetingBusy(original.id),
+              original.audioRemovalStartedAt == nil, summaryOnly || original.audioRemovedAt == nil else { return }
         do {
             let current = try store.load(id: original.id)
             try Artifacts.require(current.activeRevisionID == original.activeRevisionID
@@ -181,6 +184,8 @@ final class ProcessingController: ObservableObject {
 
     private func makeRequest(_ meeting: Meeting, summaryOnly: Bool) throws -> Request {
         try Artifacts.require(!meeting.captureState.isActive, "Finish recording before processing.")
+        try Artifacts.require(meeting.audioRemovalStartedAt == nil && (summaryOnly || meeting.audioRemovedAt == nil),
+                              "Saved audio has been removed from this meeting.")
         let revision = summaryOnly ? meeting.activeRevisionID : UUID().uuidString.lowercased()
         guard let revision else { throw CaptureFailure(message: "No accepted transcript is available for a summary retry.") }
         let names = summaryOnly ? meeting.speakerNames[revision] ?? [:] : [:]
@@ -623,6 +628,7 @@ final class ProcessingController: ObservableObject {
         try Artifacts.require(!isMeetingBusy(meeting.id) && !meeting.captureState.isActive,
                               "Finish or cancel this meeting's queued processing before changing transcription language.")
         var current = try store.load(id: meeting.id)
+        try Artifacts.require(!current.audioUnavailable, "Saved audio has been removed from this meeting.")
         current.asrLanguage = language
         try store.save(current)
         changed?()

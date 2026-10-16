@@ -28,10 +28,12 @@ struct ReviewPane: View {
     @FocusState private var searchFocused: Bool
 
     private var names: [String: String] { meeting.speakerNames[meeting.activeRevisionID ?? ""] ?? [:] }
-    private var canProcess: Bool { controller.canProcess(meeting) }
+    private var canProcessAudio: Bool { controller.canProcess(meeting) }
+    private var canRegenerateNotes: Bool { controller.canProcess(meeting, summaryOnly: true) }
     private var canCorrect: Bool {
         controller.activity == .idle && !controller.isLoading && !processing.cleanupBlocked
             && !processing.isMeetingBusy(meeting.id) && !meeting.captureState.isActive
+            && controller.deletingMeetingID != meeting.id
     }
     private var identity: String { "\(meeting.id)/\(meeting.activeRevisionID ?? "")/\(meeting.activeSummaryID ?? "")" }
     private var searchMatches: [String] {
@@ -40,25 +42,31 @@ struct ReviewPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+            if meeting.audioUnavailable {
+                Text(meeting.audioRemovedAt == nil
+                     ? "Audio removal is incomplete. Finish removing audio before processing this meeting."
+                     : "Saved audio was removed. Existing transcripts and notes remain available; playback and audio reprocessing are unavailable.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
             TranscriptionLanguagePicker(title: "Language for reprocessing", selection: Binding(
                 get: { meeting.asrLanguage ?? "auto" },
                 set: { language in
                     do { try processing.setTranscriptionLanguage(language, meeting: meeting) }
                     catch { self.error = error.localizedDescription }
                 }))
-                .disabled(!canProcess)
+                .disabled(!canProcessAudio)
             Text("Language changes apply to the next full transcription. Regenerating notes reuses the current transcript.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 if meeting.activeRevisionID == nil {
-                    Button("Process Saved Audio") { processing.start(meeting) }.disabled(!canProcess)
+                    Button("Process Saved Audio") { processing.start(meeting) }.disabled(!canProcessAudio)
                 } else {
-                    Button("Regenerate Notes") { processing.start(meeting, summaryOnly: true) }.disabled(!canProcess)
+                    Button("Regenerate Notes") { processing.start(meeting, summaryOnly: true) }.disabled(!canRegenerateNotes)
                     if transcript?.speakerLabelsPending == true {
-                        Button("Finish Speaker Labels") { processing.start(meeting) }.disabled(!canProcess)
+                        Button("Finish Speaker Labels") { processing.start(meeting) }.disabled(!canProcessAudio)
                             .help("Reuse compatible saved transcription to finish speaker labels and notes.")
                     } else {
-                        Button("Reprocess Audio…") { confirmReprocess = true }.disabled(!canProcess)
+                        Button("Reprocess Audio…") { confirmReprocess = true }.disabled(!canProcessAudio)
                     }
                     exportMenu
                 }
@@ -71,7 +79,8 @@ struct ReviewPane: View {
             if let error { Text(error).foregroundStyle(.orange).textSelection(.enabled) }
             if let transcript {
                 if transcript.segments.isEmpty {
-                    Text("No speech was found in the retained audio.").foregroundStyle(.secondary)
+                    Text(meeting.audioUnavailable ? "No speech was found before the saved audio was removed."
+                         : "No speech was found in the retained audio.").foregroundStyle(.secondary)
                 } else {
                     speakerEditor(transcript)
                         .disabled(transcript.speakerLabelsPending && processing.isBusy && processing.meetingID == meeting.id)
@@ -187,7 +196,7 @@ struct ReviewPane: View {
                                             .foregroundStyle(.secondary)
                                             .help("Play this segment's retained audio")
                                             .accessibilityLabel("Play segment at \(timestamp(segment.start_us))")
-                                            .disabled(controller.activity != .idle)
+                                            .disabled(controller.activity != .idle || meeting.audioUnavailable)
                                     }
                                     .padding(.vertical, 4)
                                     .padding(.horizontal, 2)

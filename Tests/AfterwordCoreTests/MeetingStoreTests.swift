@@ -108,11 +108,13 @@ struct MeetingStoreTests {
     }
 
     @Test func jsonUsesExplicitSnakeCaseAndIntegerTimes() throws {
-        let meeting = Meeting(title: "中文 English")
+        var meeting = Meeting(title: "中文 English")
+        meeting.audioRemovalStartedAt = "2026-10-16T10:00:00Z"
         let object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(meeting)) as? [String: Any])
         #expect(object["schema_version"] as? Int == 1)
         #expect(object["processing_status"] as? String == "idle")
         #expect(object["capture_state"] as? String == "starting")
+        #expect(object["audio_removal_started_at"] as? String == meeting.audioRemovalStartedAt)
         #expect(object["speaker_names"] != nil)
     }
 
@@ -131,6 +133,60 @@ struct MeetingStoreTests {
             }
             meeting.asrLanguage = "unsupported"
             #expect(throws: (any Error).self) { try store.save(meeting) }
+        }
+    }
+
+    @Test func legacyMeetingDecodesWithoutAudioRemovalMarkers() throws {
+        let encoded = try JSONEncoder().encode(Meeting(title: "Legacy"))
+        let meeting = try JSONDecoder().decode(Meeting.self, from: encoded)
+        #expect(meeting.audioRemovalStartedAt == nil)
+        #expect(meeting.audioRemovedAt == nil)
+        #expect(!meeting.audioUnavailable)
+    }
+
+    @Test func pendingAudioRemovalSurvivesRecoveryWithoutAudioDirectory() throws {
+        try fixture { store, _ in
+            var meeting = try store.create(title: "Pending audio removal")
+            meeting.captureState = .recording
+            meeting.intervals = [CaptureInterval(generation: 0, startUS: 0)]
+            try store.save(meeting)
+            let chunk = try record(store, meeting: meeting)
+            meeting = try store.commitChunk(meetingID: meeting.id, descriptor: chunk)
+            meeting.audioRemovalStartedAt = "2026-10-16T10:00:00Z"
+            meeting.activeRevisionID = "revision-1"
+            try store.save(meeting)
+            let audio = try store.artifactURL(meetingID: meeting.id, relativePath: "audio")
+            try FileManager.default.removeItem(at: audio)
+
+            let recovered = try #require(store.recover().first)
+            #expect(recovered == meeting)
+            #expect(recovered.audioUnavailable)
+            #expect(recovered.chunks == [chunk])
+            #expect(store.recoveryIssues.isEmpty)
+            #expect(try store.recover() == [meeting])
+        }
+    }
+
+    @Test func completedAudioRemovalSurvivesRecoveryWithoutAudioDirectory() throws {
+        try fixture { store, _ in
+            var meeting = try store.create(title: "Removed audio")
+            meeting.captureState = .stopped
+            meeting.intervals = [CaptureInterval(generation: 0, startUS: 0)]
+            try store.save(meeting)
+            let chunk = try record(store, meeting: meeting)
+            meeting = try store.commitChunk(meetingID: meeting.id, descriptor: chunk)
+            meeting.intervals[0].endUS = chunk.endUS
+            meeting.audioRemovedAt = "2026-10-16T10:00:01Z"
+            meeting.activeRevisionID = "revision-1"
+            try store.save(meeting)
+            let audio = try store.artifactURL(meetingID: meeting.id, relativePath: "audio")
+            try FileManager.default.removeItem(at: audio)
+
+            let recovered = try #require(store.recover().first)
+            #expect(recovered == meeting)
+            #expect(recovered.audioUnavailable)
+            #expect(recovered.chunks == [chunk])
+            #expect(store.recoveryIssues.isEmpty)
         }
     }
 

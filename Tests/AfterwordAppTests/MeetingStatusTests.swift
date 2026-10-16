@@ -32,6 +32,24 @@ final class MeetingStatusTests: XCTestCase {
         XCTAssertEqual(MeetingStatus.recording(meeting).tone, .warning)
     }
 
+    func testAudioRemovalRetainsTranscriptStatusWithoutClaimingSavedAudio() {
+        var meeting = Meeting(title: "Audio removed")
+        meeting.captureState = .stopped
+        meeting.audioRemovedAt = "2026-10-16T00:00:00Z"
+        XCTAssertEqual(MeetingStatus.recording(meeting).title, "Recording saved")
+        XCTAssertEqual(MeetingStatus.primary(meeting).title, "Audio removed")
+        meeting.activeRevisionID = "revision"
+        meeting.activeSummaryID = "notes"
+        meeting.processingStatus = "completed"
+        XCTAssertEqual(MeetingStatus.primary(meeting).title, "Transcript and notes ready")
+        meeting.audioRemovedAt = nil
+        meeting.audioRemovalStartedAt = "2026-10-16T00:00:00Z"
+        meeting.activeRevisionID = nil
+        XCTAssertEqual(MeetingStatus.primary(meeting).title, "Audio removal incomplete")
+        meeting.captureState = .interrupted
+        XCTAssertEqual(MeetingStatus.recording(meeting).title, "Recording interrupted")
+    }
+
     func testProcessingFailureDoesNotHideSavedResultsOrClaimReady() {
         var meeting = Meeting(title: "Retry failed")
         meeting.captureState = .stopped

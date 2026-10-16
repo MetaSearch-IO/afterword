@@ -5,6 +5,26 @@ import XCTest
 
 final class ProcessingControllerTests: XCTestCase {
     @MainActor
+    func testRemovedAudioBlocksFullProcessingButAllowsNotesFromSavedTranscript() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-processing-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MeetingStore(rootURL: directory.appendingPathComponent("meetings"))
+        var meeting = try store.create(title: "Audio removed")
+        meeting.captureState = .stopped
+        meeting.activeRevisionID = "revision"
+        meeting.audioRemovedAt = "2026-10-16T00:00:00Z"
+        try store.save(meeting)
+        let processor = ProcessingController(store: store)
+        XCTAssertFalse(processor.canProcess(meeting))
+        XCTAssertTrue(processor.canProcess(meeting, summaryOnly: true))
+        processor.start(meeting)
+        XCTAssertEqual(try store.load(id: meeting.id).processingStatus, "idle")
+        meeting.audioRemovedAt = nil
+        meeting.audioRemovalStartedAt = "2026-10-16T00:00:00Z"
+        XCTAssertFalse(processor.canProcess(meeting, summaryOnly: true))
+    }
+
+    @MainActor
     func testFastTranscriptPublicationSurvivesImmediateSummaryFailure() async throws {
         try await runFixture(terminal: "failure")
     }

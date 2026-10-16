@@ -45,11 +45,17 @@ struct MeetingStatus {
         case "paused":
             return .init(title: "Processing paused", symbol: "pause.circle", tone: .neutral, explanation: "Processing is paused. Resume Processing continues from reusable completed work.")
         case "failed":
-            return .init(title: "Processing failed", symbol: "exclamationmark.circle", tone: .warning, explanation: "Processing failed. Saved audio and accepted results are preserved; see the meeting details before retrying.")
+            return .init(title: "Processing failed", symbol: "exclamationmark.circle", tone: .warning,
+                         explanation: meeting.audioUnavailable ? "Processing failed. Saved audio was removed; review the available results in meeting details."
+                             : "Processing failed. Saved audio and accepted results are preserved; see the meeting details before retrying.")
         case "cancelled":
-            return .init(title: "Processing cancelled", symbol: "stop.circle", tone: .neutral, explanation: "Processing was cancelled. Saved audio and accepted results are preserved.")
+            return .init(title: "Processing cancelled", symbol: "stop.circle", tone: .neutral,
+                         explanation: meeting.audioUnavailable ? "Processing was cancelled. Saved audio was removed."
+                             : "Processing was cancelled. Saved audio and accepted results are preserved.")
         case "interrupted":
-            return .init(title: "Processing interrupted", symbol: "exclamationmark.circle", tone: .warning, explanation: "An earlier processing job ended unexpectedly. Saved work may be reusable on retry.")
+            return .init(title: "Processing interrupted", symbol: "exclamationmark.circle", tone: .warning,
+                         explanation: meeting.audioUnavailable ? "An earlier processing job ended unexpectedly. Saved audio was removed."
+                             : "An earlier processing job ended unexpectedly. Saved work may be reusable on retry.")
         case "empty":
             return .init(title: "No audio saved", symbol: "waveform", tone: .neutral, explanation: "There is no retained audio to transcribe.")
         case "idle", "completed", "transcript_ready":
@@ -58,6 +64,13 @@ struct MeetingStatus {
                     return .init(title: "Transcript and notes ready", symbol: "checkmark.circle.fill", tone: .success, explanation: "The transcript and notes cover the audio that was saved.")
                 }
                 return .init(title: "Transcript ready", symbol: "doc.text", tone: .success, explanation: "A transcript is saved. Open the meeting to review it or continue processing.")
+            }
+            if meeting.audioUnavailable {
+                return meeting.audioRemovedAt == nil
+                    ? .init(title: "Audio removal incomplete", symbol: "exclamationmark.triangle.fill", tone: .warning,
+                            explanation: "Some audio may remain. Finish removing it before processing this meeting.")
+                    : .init(title: "Audio removed", symbol: "waveform.slash", tone: .neutral,
+                            explanation: "Saved audio was deleted. This meeting has no transcript and cannot be transcribed now.")
             }
             if meeting.processingStatus != "idle" {
                 return .init(title: "No transcript saved", symbol: "exclamationmark.circle", tone: .warning, explanation: "No accepted transcript is available. Review the meeting details and retry processing.")

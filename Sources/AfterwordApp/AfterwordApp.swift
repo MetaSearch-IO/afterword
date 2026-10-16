@@ -48,12 +48,13 @@ struct MeetingWindow: View {
     @State private var deletionPrompt: DeletionPrompt?
 
     private enum DeletionPrompt {
-        case confirm(Meeting), failed(String)
+        case confirm(Meeting), confirmAudio(Meeting), failed(String)
 
         var title: String {
             switch self {
             case .confirm: "Delete meeting?"
-            case .failed: "Unable to delete meeting"
+            case .confirmAudio: "Delete saved audio?"
+            case .failed: "Unable to delete"
             }
         }
 
@@ -61,6 +62,10 @@ struct MeetingWindow: View {
             switch self {
             case .confirm(let meeting):
                 "Permanently delete “\(meeting.title)” and all its local audio, transcripts, notes, calendar details, and working files? Exported copies are kept. This cannot be undone."
+            case .confirmAudio(let meeting):
+                meeting.activeRevisionID == nil
+                    ? "Permanently delete all saved audio for “\(meeting.title)”? No transcript exists, so one cannot be created afterward. Meeting details remain. This cannot be undone."
+                    : "Permanently delete all saved audio for “\(meeting.title)”? Existing transcripts and notes remain, but playback and audio reprocessing will be unavailable. This cannot be undone."
             case .failed(let message): message
             }
         }
@@ -88,6 +93,14 @@ struct MeetingWindow: View {
                 Button("Delete Meeting", role: .destructive) {
                     Task {
                         do { try await controller.deleteMeeting(id: meeting.id) }
+                        catch { deletionPrompt = .failed(error.localizedDescription) }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            case .confirmAudio(let meeting):
+                Button("Delete Audio", role: .destructive) {
+                    Task {
+                        do { try await controller.deleteMeetingAudio(id: meeting.id) }
                         catch { deletionPrompt = .failed(error.localizedDescription) }
                     }
                 }
@@ -161,7 +174,7 @@ struct MeetingWindow: View {
         } detail: {
             VStack(alignment: .leading, spacing: 20) {
                 if controller.deletingMeetingID != nil {
-                    ProgressView("Deleting meeting and local files…").controlSize(.small)
+                    ProgressView("Deleting local files…").controlSize(.small)
                 }
                 if controller.recoveryBlocked { Button("Check Previous Job Cleanup") { controller.recheckRecovery() } }
                 else if controller.isLoading { ProgressView("Checking saved meetings…") }
@@ -299,11 +312,14 @@ struct MeetingWindow: View {
                 .help("Times are shown in \(TimeZone.autoupdatingCurrent.identifier).")
             LabeledContent("Recording", value: MeetingStatus.recording(meeting).title)
                 .help(MeetingStatus.recording(meeting).explanation)
-            LabeledContent("Saved audio", value: duration(meeting.retainedDurationUS))
+            LabeledContent("Saved audio", value: meeting.audioUnavailable
+                           ? (meeting.audioRemovedAt == nil ? "Removal incomplete" : "Removed")
+                           : duration(meeting.retainedDurationUS))
             ForEach(AudioSource.allSources, id: \.rawValue) { source in
                 let chunks = meeting.chunks.filter { $0.source == source }
                 LabeledContent(source == .microphone ? "Microphone" : "System output",
-                               value: chunks.isEmpty ? "No audio saved" : duration(chunks.reduce(0) { $0 + $1.durationUS }))
+                               value: chunks.isEmpty ? "No audio saved"
+                                   : (meeting.audioUnavailable ? "Removed" : duration(chunks.reduce(0) { $0 + $1.durationUS })))
             }
             let status = MeetingStatus.processing(meeting, stage: processing.meetingID == meeting.id ? processing.stage : nil)
             LabeledContent("Processing", value: status.title).help(status.explanation)
@@ -317,6 +333,11 @@ struct MeetingWindow: View {
                 Text(error).foregroundStyle(.orange).textSelection(.enabled)
             }
             Button("Show Saved Files") { controller.revealMeeting(meeting) }
+            if meeting.audioRemovedAt == nil && (!meeting.chunks.isEmpty || meeting.audioRemovalStartedAt != nil) {
+                Button(meeting.audioRemovalStartedAt == nil ? "Delete Saved Audio…" : "Finish Removing Audio") {
+                    deletionPrompt = .confirmAudio(meeting)
+                }.disabled(!controller.canDeleteMeetingAudio(meeting))
+            }
             if let error = meeting.processingError { Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled) }
         }
     }
