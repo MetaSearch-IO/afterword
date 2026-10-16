@@ -134,9 +134,10 @@ Runtime configuration is written atomically to
 `~/Library/Application Support/Afterword/runtime.json`; it contains absolute
 Python, worker, native executable, and model paths plus hashes/provenance.
 
-The bundle uses ad hoc signing for local development, without hardened runtime
-or App Sandbox. It is not distribution-ready. Permission persistence across
-rebuilds must be tested; a stable bundle identifier alone does not prove it.
+The bundle uses ad hoc signing by default, without hardened runtime or App
+Sandbox. A local `.build/afterword-signing-identity` file can select a
+certificate identity for repeatable privacy grants; `AFTERWORD_SIGNING_IDENTITY`
+overrides it. Neither local signing mode makes the app distribution-ready.
 No initial commit or remote is required by this setup.
 
 SwiftPM requires host execution because its nested sandbox cannot start inside
@@ -284,7 +285,8 @@ exit cannot be missed while awaiting worker completion.
   silently dropping samples or growing memory indefinitely.
 - Use a shared monotonic timeline. Persist integer microseconds for meeting
   offsets and integer sample positions/counts for prepared audio mappings.
-  Preserve native sample format in each chunk descriptor.
+- Request 16 kHz mono system audio. Save both sources as 16-bit PCM in CAF,
+  retaining the actual sample rate and channel count in each chunk descriptor.
 
 ### Pause, gaps, and conversion
 
@@ -297,7 +299,9 @@ previous capture generation. Show Paused only after the writer barrier completes
 Every source has an explicit piecewise mapping from prepared sample ranges to
 meeting intervals. Different source start times and known delivery gaps must
 remain representable. Never treat missing source data as proof of silence.
-Unexpected discontinuities beyond an established tolerance interrupt capture.
+Forward microphone timestamp gaps split saved chunks and leave a visible warning;
+speech in those gaps is unavailable. Backward timestamp overlap, format changes,
+and stream failure still interrupt capture.
 
 After a stream failure or Stop, start/pause/resume must not claim an active
 recording or open another capture interval. Native errors retain their domain
@@ -806,6 +810,13 @@ The observed exit was reported by launchd as `(0, 0, 0)`; no Afterword report wa
 found in the user's diagnostic-report directory. That supports a normal exit
 during the permission changes rather than establishing an application crash.
 Evidence is in `.build/recording-recovery-checks-2026-10-08.json`.
+
+On October 12, TCC logs showed that the enabled ScreenCapture grant matched an
+older ad hoc code hash, while the running app had a different hash. A local
+self-signed certificate was imported into the login Keychain without changing
+system trust settings. Two differently hashed builds signed with it had the
+same designated requirement. The installed app now uses that identity, and its
+stale ScreenCapture and Microphone grants were reset for fresh authorization.
 
 ### October 8 meeting deletion
 

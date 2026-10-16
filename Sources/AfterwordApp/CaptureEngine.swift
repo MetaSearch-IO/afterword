@@ -29,6 +29,7 @@ struct CaptureFailure: LocalizedError {
 final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     enum Event: Sendable {
         case level(AudioSource, Float)
+        case warning(String)
         case failed(String)
     }
 
@@ -78,6 +79,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private var writers: [AudioSource: Writer] = [:]
     private var formats: [AudioSource: AVAudioFormat] = [:]
     private var lastEnd: [AudioSource: Int64] = [:]
+    private var microphoneGapCount = 0
+    private var largestMicrophoneGapUS: Int64 = 0
     private var intervals: [CaptureInterval] = []
     private var pending: [AudioSource: Double] = [:]
     private var accepting = true
@@ -117,8 +120,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         config.excludesCurrentProcessAudio = true
         config.captureMicrophone = true
         config.microphoneCaptureDeviceID = microphoneID
-        config.sampleRate = 48_000
-        config.channelCount = 2
+        config.sampleRate = 16_000
+        config.channelCount = 1
         let capture = SCStream(filter: filter, configuration: config, delegate: self)
         try lock.withLock {
             try requireActiveLocked()
@@ -200,7 +203,10 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             }
             let finalReason = self.lock.withLock { self.failureReason } ?? externalReason
             self.meeting.captureState = finalReason == nil ? .stopped : .interrupted
-            self.meeting.captureError = finalReason
+            let gapLabel = self.microphoneGapCount == 1 ? "gap" : "gaps"
+            let gapWarning = self.microphoneGapCount == 0 ? nil
+                : "Microphone audio was missing in \(self.microphoneGapCount) \(gapLabel), largest \(self.largestMicrophoneGapUS / 1_000) ms. Recording continued; speech during missing audio was not captured."
+            self.meeting.captureError = finalReason ?? gapWarning
             self.meeting.processingStatus = "idle"
             try self.store.save(self.meeting)
             return self.meeting
@@ -325,21 +331,40 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let timeline = CaptureTimeline(intervals: allowed)
         for slice in timeline.intersections(bufferStartUS: packet.startUS, frameCount: packet.sample.numSamples,
                                             sampleRate: format.sampleRate, generation: packet.generation) {
-            if let last = lastEnd[packet.source] {
-                let gap = slice.startUS - last
-                guard gap >= -100, packet.source == .system || gap <= 250_000 else {
-                    throw CaptureFailure(message: "The \(packet.source.rawValue) audio timeline became discontinuous.")
-                }
-                if abs(gap) > Int64(2_000_000 / format.sampleRate) { try finishWriter(packet.source) }
-            }
             var offset = slice.offset
             var remaining = slice.count
+            var sliceStartUS = slice.startUS
+            if let last = lastEnd[packet.source] {
+                let gap = sliceStartUS - last
+                guard gap >= -100 else {
+                    throw CaptureFailure(message: "The \(packet.source.rawValue) audio timeline moved backwards by \(-gap) microseconds. Recording stopped to avoid overlapping saved audio.")
+                }
+                if gap < -2 {
+                    let skipped = Int(ceil(Double(-gap) * format.sampleRate / 1_000_000))
+                    guard skipped < remaining else { continue }
+                    offset += skipped
+                    remaining -= skipped
+                    sliceStartUS += Int64((Double(skipped) * 1_000_000 / format.sampleRate).rounded())
+                }
+                if packet.source == .microphone, gap > 250_000 {
+                    microphoneGapCount += 1
+                    largestMicrophoneGapUS = max(largestMicrophoneGapUS, gap)
+                    if microphoneGapCount == 1 {
+                        event(.warning("Microphone audio was missing for \(gap / 1_000) ms. Recording continues, but speech in that gap was not captured."))
+                    }
+                }
+                if abs(sliceStartUS - last) > Int64(2_000_000 / format.sampleRate) { try finishWriter(packet.source) }
+            }
+            let firstOffset = offset
+            let acceptedCount = remaining
             while remaining > 0 {
-                let startUS = slice.startUS + Int64(Double(offset - slice.offset) * 1_000_000 / format.sampleRate)
+                let startUS = sliceStartUS + Int64(Double(offset - firstOffset) * 1_000_000 / format.sampleRate)
                 if writers[packet.source] == nil {
                     let id = UUID().uuidString.lowercased()
                     let directory = try store.beginChunk(meetingID: meeting.id, chunkID: id)
                     var settings = format.settings
+                    settings[AVLinearPCMBitDepthKey] = 16
+                    settings[AVLinearPCMIsFloatKey] = false
                     settings[AVLinearPCMIsNonInterleaved] = false
                     let file = try AVAudioFile(forWriting: directory.appendingPathComponent("audio.caf"),
                                               settings: settings, commonFormat: format.commonFormat,
@@ -363,7 +388,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 event(.level(packet.source, Self.level(pcm)))
                 if writer.frames >= Int64(format.sampleRate * 5) { try finishWriter(packet.source) }
             }
-            lastEnd[packet.source] = slice.startUS + Int64(Double(slice.count) * 1_000_000 / format.sampleRate)
+            lastEnd[packet.source] = sliceStartUS + Int64(Double(acceptedCount) * 1_000_000 / format.sampleRate)
         }
     }
 

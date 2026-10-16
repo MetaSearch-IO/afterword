@@ -24,6 +24,14 @@ final class MeetingStatusTests: XCTestCase {
         XCTAssertEqual(MeetingStatus.primary(meeting).title, "Recording")
     }
 
+    func testSavedRecordingWithMicrophoneGapsRetainsWarning() {
+        var meeting = Meeting(title: "Recording with gaps")
+        meeting.captureState = .stopped
+        meeting.captureError = "Microphone audio was missing for 500 ms."
+        XCTAssertEqual(MeetingStatus.recording(meeting).title, "Recording saved with gaps")
+        XCTAssertEqual(MeetingStatus.recording(meeting).tone, .warning)
+    }
+
     func testProcessingFailureDoesNotHideSavedResultsOrClaimReady() {
         var meeting = Meeting(title: "Retry failed")
         meeting.captureState = .stopped

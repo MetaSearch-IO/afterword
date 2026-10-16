@@ -5,7 +5,18 @@ project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
 
 app_path="${1:-$project_root/.build/Afterword.app}"
-afterword_signing_identity="${AFTERWORD_SIGNING_IDENTITY:--}"
+signing_identity_file="$project_root/.build/afterword-signing-identity"
+if [[ ${AFTERWORD_SIGNING_IDENTITY+x} ]]; then
+    afterword_signing_identity="$AFTERWORD_SIGNING_IDENTITY"
+elif [[ -f "$signing_identity_file" ]]; then
+    read -r afterword_signing_identity < "$signing_identity_file"
+    if [[ ! "$afterword_signing_identity" =~ ^[[:xdigit:]]{40}$ ]]; then
+        printf '%s\n' "Invalid signing identity in $signing_identity_file" >&2
+        exit 1
+    fi
+else
+    afterword_signing_identity="-"
+fi
 if [[ "$afterword_signing_identity" == "-" ]]; then
     if [[ -d "$app_path" ]] && codesign -dv "$app_path" 2>&1 | grep -q '^Authority='; then
         printf '%s\n' 'Set AFTERWORD_SIGNING_IDENTITY to preserve the existing certificate-signed app identity.' >&2

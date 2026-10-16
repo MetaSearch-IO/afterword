@@ -167,6 +167,12 @@ class InferenceTests(unittest.TestCase):
             with self.assertRaises(WorkerError):
                 parse_vad(value, 96000)
 
+    def test_vad_clamps_two_centiseconds_of_end_padding(self):
+        output = "Detected 1 speech segments:\nSpeech segment 0: start = 19790.00, end = 19802.00\n"
+        self.assertEqual(parse_vad(output, 198 * 16000), [(19790 * 160, 198 * 16000)])
+        with self.assertRaises(WorkerError):
+            parse_vad(output.replace("19802.00", "19803.00"), 198 * 16000)
+
     def test_large_utterance_batches_preserve_remainder_order_and_pause_boundaries(self):
         class FixtureControl:
             def __init__(self):

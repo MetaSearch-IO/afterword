@@ -74,7 +74,7 @@ def parse_vad(text: str, frame_count: int):
         match = re.fullmatch(r"Speech segment ([0-9]+): start = ([0-9]+\.[0-9]{2}), end = ([0-9]+\.[0-9]{2})", line)
         require(match is not None and int(match[1]) == index, "VAD returned a malformed speech range.")
         start, end = round(Decimal(match[2]) * 160), round(Decimal(match[3]) * 160)
-        require(previous_end <= start < end <= frame_count + 160, "VAD speech range exceeds or overlaps the source audio.")
+        require(previous_end <= start < end <= frame_count + 320, "VAD speech range exceeds or overlaps the source audio.")
         end = min(end, frame_count)
         require(start < end, "VAD speech range has no source audio.")
         ranges.append((start, end))

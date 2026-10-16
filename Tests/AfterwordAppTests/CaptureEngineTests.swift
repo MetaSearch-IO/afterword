@@ -74,6 +74,7 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
             let url = try store.meetingURL(id: meeting.id).appendingPathComponent(chunk.relativePath)
             let file = try AVAudioFile(forReading: url)
             XCTAssertEqual(file.length, 16_000)
+            XCTAssertEqual(file.fileFormat.streamDescription.pointee.mBitsPerChannel, 16)
             let data = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 1))
             try file.read(into: data, frameCount: 1)
             XCTAssertEqual(data.floatChannelData![0][0], 0.25)
@@ -288,6 +289,69 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(meeting.captureState, .stopped)
         XCTAssertEqual(meeting.chunks.map(\.startUS).sorted(), [0, 3_000_000])
         XCTAssertEqual(meeting.chunks.map(\.frameCount), [16_000, 16_000])
+    }
+
+    func testMicrophoneGapKeepsRecordingAndPreservesMissingTime() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let warning = expectation(description: "Microphone gap warning")
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { event in
+            if case .warning(let detail) = event {
+                XCTAssertTrue(detail.contains("500 ms"))
+                warning.fulfill()
+            }
+        }
+        let pcm = try sample()
+        clock.set(3_000_000)
+        engine.enqueue(pcm, source: .microphone, hostTimestamp: .zero)
+        engine.enqueue(pcm, source: .microphone, hostTimestamp: CMTime(value: 3, timescale: 2))
+        let meeting = try await engine.stop()
+        await fulfillment(of: [warning], timeout: 1)
+        XCTAssertEqual(meeting.captureState, .stopped)
+        XCTAssertEqual(meeting.chunks.map(\.startUS).sorted(), [0, 1_500_000])
+        XCTAssertTrue(meeting.captureError?.contains("500 ms") == true)
+        XCTAssertEqual(try store.load(id: meeting.id).captureError, meeting.captureError)
+        let preparedPath = try AudioPreparation.prepare(meeting: meeting, rootURL: directory, runID: UUID().uuidString)
+        let prepared = try JSONDecoder().decode(PreparedAudio.self,
+            from: Data(contentsOf: store.artifactURL(meetingID: meeting.id, relativePath: preparedPath)))
+        XCTAssertEqual(prepared.sources.first?.pieces.map(\.meeting_start_us), [0, 1_500_000])
+    }
+
+    func testMicrophoneTimestampOverlapStillInterruptsCapture() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { _ in }
+        let pcm = try sample()
+        clock.set(2_000_000)
+        engine.enqueue(pcm, source: .microphone, hostTimestamp: .zero)
+        engine.enqueue(pcm, source: .microphone, hostTimestamp: CMTime(value: 1, timescale: 2))
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.captureState, .interrupted)
+        XCTAssertEqual(meeting.chunks.count, 1)
+        XCTAssertTrue(meeting.captureError?.contains("moved backwards by 500000 microseconds") == true)
+    }
+
+    func testSmallTimestampOverlapDoesNotInvalidateNextChunk() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { _ in }
+        let pcm = try sample()
+        for second in 0..<5 {
+            clock.set(Int64(second + 1) * 1_000_000)
+            engine.enqueue(pcm, source: .system, hostTimestamp: CMTime(value: Int64(second), timescale: 1))
+            try await engine.rename(to: "Test")
+        }
+        clock.set(7_000_000)
+        engine.enqueue(pcm, source: .system, hostTimestamp: CMTime(value: 4_999_950, timescale: 1_000_000))
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.captureState, .stopped)
+        let chunks = meeting.chunks.sorted { $0.startUS < $1.startUS }
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertGreaterThanOrEqual(chunks[1].startUS, chunks[0].endUS - 2)
+        XCTAssertEqual(chunks.map(\.frameCount), [80_000, 15_999])
     }
 
     func testCaptureSessionPersistsSelectedLanguageWithoutStartingHardware() async throws {

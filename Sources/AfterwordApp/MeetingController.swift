@@ -388,6 +388,7 @@ final class MeetingController: ObservableObject {
             if activity == .recording {
                 if source == .microphone { microphoneLevel = value } else { systemLevel = value }
             }
+        case .warning(let detail): message = detail
         case .failed(let reason): interrupt(reason)
         }
     }

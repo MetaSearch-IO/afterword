@@ -23,6 +23,10 @@ struct MeetingStatus {
         case .finalizing:
             return .init(title: "Saving recording", symbol: "square.and.arrow.down", tone: .active, explanation: "Finishing and saving recorded audio.")
         case .stopped:
+            if meeting.captureError != nil {
+                return .init(title: "Recording saved with gaps", symbol: "exclamationmark.triangle.fill", tone: .warning,
+                             explanation: "Recording continued after microphone audio was missed. Saved audio and transcripts may omit speech during those gaps.")
+            }
             return .init(title: "Recording saved", symbol: "waveform", tone: .neutral, explanation: "Recording ended normally. Transcription and notes have a separate processing status.")
         case .interrupted:
             let retained = meeting.chunks.isEmpty ? "No audio was saved." : "Saved audio is available to review or process."

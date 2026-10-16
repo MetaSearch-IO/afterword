@@ -15,8 +15,14 @@ struct MeetingListRow: View {
     private var secondary: Color { selectedForeground ? .white.opacity(0.85) : .secondary }
     private var status: MeetingStatus { .primary(meeting, stage: processingStage) }
     private var keepingDetailsOpen: Bool { hoveringRow || hoveringDetails || detailsPinned }
+    private var hasRecordingIssue: Bool {
+        meeting.captureState == .interrupted || (meeting.captureState == .stopped && meeting.captureError != nil)
+    }
+    private var recordingIssueTitle: String {
+        meeting.captureState == .interrupted ? "Recording interrupted" : "Recording has audio gaps"
+    }
     private var statusHelp: String {
-        guard meeting.captureState == .interrupted else { return status.explanation }
+        guard hasRecordingIssue else { return status.explanation }
         var parts = ["Processing: \(status.explanation)",
                      "Recording: \(MeetingStatus.recording(meeting).explanation)"]
         if !meeting.chunks.isEmpty { parts[1] += " The recording may be incomplete." }
@@ -53,7 +59,7 @@ struct MeetingListRow: View {
             } icon: {
                 Image(systemName: status.symbol).foregroundStyle(statusColor)
             }.font(.caption).lineLimit(1)
-            if meeting.captureState == .interrupted {
+            if hasRecordingIssue {
                 Button {
                     if showingStatusDetails {
                         showingStatusDetails = false
@@ -62,13 +68,13 @@ struct MeetingListRow: View {
                         showingStatusDetails = true
                     }
                 } label: {
-                    Label("Recording interrupted", systemImage: "exclamationmark.triangle.fill")
+                    Label(recordingIssueTitle, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(selectedForeground ? .white : .orange)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
                 .font(.caption)
-                .accessibilityLabel("Recording interrupted. Show details")
+                .accessibilityLabel("\(recordingIssueTitle). Show details")
                 .accessibilityIdentifier("meeting-status-details")
             }
             if let available = MeetingStatus.savedResults(meeting) {
@@ -99,12 +105,14 @@ struct MeetingListRow: View {
                     Text(status.title).font(.headline)
                     Text(status.explanation).fixedSize(horizontal: false, vertical: true)
                 }
-                if meeting.captureState == .interrupted {
+                if hasRecordingIssue {
                     VStack(alignment: .leading, spacing: 5) {
-                        Label("Recording interrupted", systemImage: "exclamationmark.triangle.fill")
+                        Label(recordingIssueTitle, systemImage: "exclamationmark.triangle.fill")
                             .font(.headline)
-                        Text(meeting.chunks.isEmpty ? "Recording ended unexpectedly. No audio was saved."
-                             : "Audio capture stopped unexpectedly. Part of the meeting may be missing from the saved audio, transcript, and notes.")
+                        Text(meeting.captureState == .interrupted
+                             ? (meeting.chunks.isEmpty ? "Recording ended unexpectedly. No audio was saved."
+                                : "Audio capture stopped unexpectedly. Part of the meeting may be missing from the saved audio, transcript, and notes.")
+                             : "Microphone audio was missed briefly. Saved audio and transcripts may omit speech during those gaps.")
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     if let error = meeting.captureError?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
