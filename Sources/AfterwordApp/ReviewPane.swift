@@ -445,6 +445,7 @@ struct ReviewPane: View {
         case "speaker_labeling_pending": "Speaker labeling is pending."
         case "incomplete_speaker_timing": "Speaker timing does not cover the entire segment."
         case "single_exclusive_turn_with_vad_padding": "One speaker covers the speech; detection padding was ignored."
+        case "single_exclusive_turn_with_bounded_gap": "One speaker covers most detected speech with small timing gaps."
         case "speaker_change_or_missing_timing": "No single speaker could be confirmed for this segment."
         case "overlapping_remote_speech": "Multiple speakers overlap here."
         case "asr_timing_exceeds_retained_audio": "Timing extends beyond the retained audio."

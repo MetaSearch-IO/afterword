@@ -50,13 +50,34 @@ class InferenceTests(unittest.TestCase):
         self.assertEqual(attribution(original, {"regular": [turn], "exclusive": [turn]}),
                          (None, "incomplete_speaker_timing", False))
 
-    def test_padding_support_cannot_hide_missing_speech_changes_or_overlap(self):
+    def test_one_speaker_can_cover_supported_speech_with_small_boundary_gaps(self):
+        segment = {"source": "system", "sample_start": 0, "sample_end": 16000,
+                   "speech_sample_start": 1440, "speech_sample_end": 14560}
+        turn = {"sample_start": 1700, "sample_end": 14300, "speaker": "A"}
+        self.assertEqual(attribution(segment, {"regular": [turn], "exclusive": [turn]}),
+                         ("A", "single_exclusive_turn_with_bounded_gap", False))
+        for trimmed in ({**turn, "sample_start": 1441}, {**turn, "sample_end": 14559}):
+            self.assertEqual(attribution(segment, {"regular": [turn], "exclusive": [trimmed]}),
+                             ("A", "single_exclusive_turn_with_bounded_gap", False))
+        short = {**turn, "sample_start": 6000, "sample_end": 12000}
+        self.assertEqual(attribution(segment, {"regular": [short], "exclusive": [short]}),
+                         (None, "incomplete_speaker_timing", False))
+        long_segment = {"source": "system", "sample_start": 0, "sample_end": 32000,
+                        "speech_sample_start": 1600, "speech_sample_end": 30400}
+        late = {"sample_start": 4160, "sample_end": 30400, "speaker": "A"}
+        self.assertEqual(attribution(long_segment, {"regular": [late], "exclusive": [late]}),
+                         (None, "incomplete_speaker_timing", False))
+        brief = {"source": "system", "sample_start": 0, "sample_end": 6400,
+                 "speech_sample_start": 0, "speech_sample_end": 6400}
+        brief_turn = {"sample_start": 0, "sample_end": 6000, "speaker": "A"}
+        self.assertEqual(attribution(brief, {"regular": [brief_turn], "exclusive": [brief_turn]}),
+                         (None, "incomplete_speaker_timing", False))
+
+    def test_padding_support_cannot_hide_internal_gaps_speech_changes_or_overlap(self):
         segment = {"source": "system", "sample_start": 0, "sample_end": 16000,
                    "speech_sample_start": 1440, "speech_sample_end": 14560}
         turn = {"sample_start": 1000, "sample_end": 15000, "speaker": "A"}
         cases = [
-            ([turn], [{**turn, "sample_start": 1441}]),
-            ([turn], [{**turn, "sample_end": 14559}]),
             ([turn], [{**turn, "sample_end": 7000}, {**turn, "sample_start": 7001}]),
             ([turn], []),
             ([turn], [turn, {"sample_start": 0, "sample_end": 800, "speaker": "B"}]),

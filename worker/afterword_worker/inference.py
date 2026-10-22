@@ -13,7 +13,7 @@ RATE = 16_000
 WINDOW = 300 * RATE
 OVERLAP = 2 * RATE
 ASR_VERSION = 6
-ALIGNMENT_VERSION = 2
+ALIGNMENT_VERSION = 3
 MODEL_WINDOW_SAMPLES = 30 * RATE
 VAD_OPTIONS = {"min_speech_ms": 100, "min_silence_ms": 400, "padding_ms": 100}
 ASR_BATCH_SIZE = 64
@@ -268,6 +268,21 @@ def attribution(segment: dict, turns: dict):
         return None, "speaker_change_or_missing_timing", False
     if covers(supported_start, supported_end):
         return label, "single_exclusive_turn_with_vad_padding", False
+    if "speech_sample_start" in segment:
+        speech_intervals = sorted((max(supported_start, lower), min(supported_end, upper))
+                                  for lower, upper in intervals if lower < supported_end and upper > supported_start)
+        if speech_intervals:
+            lower, upper = speech_intervals[0]
+            contiguous = True
+            for next_lower, next_upper in speech_intervals[1:]:
+                if next_lower > upper:
+                    contiguous = False
+                    break
+                upper = max(upper, next_upper)
+            if contiguous and (upper - lower) * 10 >= (supported_end - supported_start) * 9 \
+                    and upper - lower >= RATE // 2 \
+                    and max(lower - supported_start, supported_end - upper) <= RATE * 150 // 1000:
+                return label, "single_exclusive_turn_with_bounded_gap", False
     return None, "incomplete_speaker_timing", False
 
 
