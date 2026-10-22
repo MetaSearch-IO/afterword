@@ -12,6 +12,8 @@ from .inference import ALIGNMENT_VERSION, ASR_VERSION, RATE, VAD_OPTIONS, align,
 from .protocol import WorkerError, meeting_lock
 from .summary import (INSTRUCTIONS, MODEL_SCHEMA, SummaryEngine, extraction_identity,
                       recover_extraction_checkpoint, summarize, validate_extraction_checkpoint)
+from .voice_profiles import (assign_profiles, embedding_fingerprint,
+                             load_prior_profiles, save_profiles, voice_label)
 
 
 def committed_fingerprint(meeting):
@@ -200,12 +202,16 @@ def process(args, control):
                                           "input_fingerprint": asr_key, "segments": segments})
             control.emit("stage_completed", stage="asr", artifacts=[f"work/{args.run_id}/asr.json"], input_fingerprint=asr_key, reused=reused)
 
-            def publish_transcript(revision_id, turns):
-                transcript = validate_transcript(align(segments, turns, prepared, meeting_id, revision_id, args.run_id), meeting_id, revision_id)
+            def publish_transcript(revision_id, turns, profiles=None):
+                voice_labels = {item["speaker_id"]: voice_label(item["voice_id"])
+                                for item in profiles["profiles"]} if profiles else None
+                transcript = validate_transcript(align(segments, turns, prepared, meeting_id, revision_id,
+                                                       args.run_id, voice_labels=voice_labels), meeting_id, revision_id)
                 provenance = {"schema_version": 1, "run_id": args.run_id, "meeting_id": meeting_id, "revision_id": revision_id,
                               "input_fingerprint": digest({"asr": asr_key, "diarization": runtime.get("models", {}).get("diarization") if turns["mode"] != "deferred" else None,
                                                            "diarization_mode": turns["mode"], "diarization_status": turns["status"],
-                                                           "diarization_execution": turns.get("execution"), "alignment": ALIGNMENT_VERSION}),
+                                                           "diarization_execution": turns.get("execution"), "alignment": ALIGNMENT_VERSION,
+                                                           "voice_profiles": digest(profiles) if profiles else None}),
                               "diarization_mode": turns["mode"], "diarization_status": turns["status"],
                               "diarization_execution": turns.get("execution"),
                               "preparation_version": 1, "alignment_version": ALIGNMENT_VERSION, "language_policy": language_policy, "asr_language": language,
@@ -246,7 +252,20 @@ def process(args, control):
             atomic_json(work / "diarization-checkpoint.json", {"schema_version": 1, "run_id": args.run_id, **turns})
             control.emit("stage_completed", stage="diarization", artifacts=[f"work/{args.run_id}/diarization-checkpoint.json"], input_fingerprint=asr_key)
             control.begin("alignment")
-            transcript, provenance = publish_transcript(args.revision_id, turns)
+            profiles = None
+            if turns.get("speaker_embeddings"):
+                fingerprint = embedding_fingerprint(runtime)
+                require(fingerprint is not None, "The speaker embedding model has no pinned fingerprint.")
+                labels = sorted({turn["speaker"] for turn in turns["exclusive"]})
+                speaker_ids = {label: f"remote-{index + 1:03d}" for index, label in enumerate(labels)}
+                vectors = {speaker_ids[item["speaker"]]: item["vector"] for item in turns["speaker_embeddings"]
+                           if item["speaker"] in speaker_ids}
+                if vectors:
+                    prior = load_prior_profiles(root, fingerprint, len(next(iter(vectors.values()))), control.check)
+                    profiles = assign_profiles(meeting_id, args.revision_id, args.run_id, fingerprint, vectors, prior)
+            transcript, provenance = publish_transcript(args.revision_id, turns, profiles)
+            if profiles:
+                save_profiles(root, profiles)
         control.emit("stage_completed", stage="alignment", revision_id=args.revision_id,
                      transcript_path=str(transcript_path.relative_to(root)), provenance_path=str(provenance_path.relative_to(root)),
                      artifacts=[str(transcript_path.relative_to(root)), str(provenance_path.relative_to(root))],

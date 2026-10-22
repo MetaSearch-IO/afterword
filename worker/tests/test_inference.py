@@ -4,12 +4,35 @@ import tempfile
 import unittest
 import wave
 
-from afterword_worker.inference import align, attribution, extract_wav, parse_vad, parse_whisper, reconcile_overlap, speech_support, transcribe
+from afterword_worker.inference import align, attribution, extract_wav, parse_vad, parse_whisper, reconcile_overlap, speech_support, transcribe, validate_turns
 from afterword_worker.pipeline import validate_asr
 from afterword_worker.protocol import WorkerError
 
 
 class InferenceTests(unittest.TestCase):
+    def test_diarization_embeddings_are_bound_to_returned_speakers(self):
+        turns = {"schema_version": 1,
+                 "regular": [{"sample_start": 0, "sample_end": 16000, "speaker": "A"}],
+                 "exclusive": [{"sample_start": 0, "sample_end": 16000, "speaker": "A"}],
+                 "speaker_embeddings": [{"speaker": "A", "vector": [1.0, 0.0]}]}
+        self.assertEqual(validate_turns(turns, 16000), turns)
+        for invalid in ([{"speaker": "B", "vector": [1.0, 0.0]}],
+                        [{"speaker": "A", "vector": [0.0, 0.0]}],
+                        [{"speaker": "A", "vector": [1.0, 0.0]}] * 2):
+            with self.subTest(invalid=invalid), self.assertRaises(WorkerError):
+                validate_turns({**turns, "speaker_embeddings": invalid}, 16000)
+
+    def test_voice_label_changes_display_without_changing_segment_identity(self):
+        source = {"source": "system", "pieces": [{"sample_start": 0, "sample_end": 16000, "meeting_start_us": 0}]}
+        segment = {"source": "system", "sample_start": 0, "sample_end": 16000, "text": "Speech"}
+        turn = {"sample_start": 0, "sample_end": 16000, "speaker": "A"}
+        turns = {"regular": [turn], "exclusive": [turn]}
+        original = align([segment], turns, {"sources": [source]}, "meeting", "revision", "run")
+        labeled = align([segment], turns, {"sources": [source]}, "meeting", "revision", "run",
+                        voice_labels={"remote-001": "Voice AAAAAAAA"})
+        self.assertEqual(labeled["speakers"][0]["label"], "Voice AAAAAAAA")
+        self.assertEqual(labeled["segments"], original["segments"])
+
     def test_vad_support_only_removes_known_padding_with_rounding_margin(self):
         self.assertEqual(speech_support([(1600, 8000)], 0, 16000), (3040, 6560))
         self.assertEqual(speech_support([(0, 16000)], 0, 16000), (0, 16000))

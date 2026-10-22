@@ -6,6 +6,8 @@ from numbers import Integral
 from pathlib import Path
 import wave
 
+from .voice_profiles import unit_vector
+
 
 def progress_hook():
     counts = {}
@@ -74,8 +76,18 @@ def main():
                 output.append({"sample_start": start, "sample_end": end, "speaker": str(speaker)})
         return output
 
+    embeddings = []
+    if result.speaker_embeddings is not None:
+        labels = result.speaker_diarization.labels()
+        if len(labels) != len(result.speaker_embeddings):
+            raise RuntimeError("Speaker embeddings do not match diarization labels.")
+        for label, values in zip(labels, result.speaker_embeddings):
+            vector = unit_vector(values.tolist())
+            if vector is not None:
+                embeddings.append({"speaker": str(label), "vector": vector})
+
     value = {"schema_version": 1, "regular": turns(result.speaker_diarization),
-             "exclusive": turns(result.exclusive_speaker_diarization),
+             "exclusive": turns(result.exclusive_speaker_diarization), "speaker_embeddings": embeddings,
              "execution": {"device": str(pipeline.device),
                            "segmentation_batch_size": pipeline.segmentation_batch_size,
                            "embedding_batch_size": pipeline.embedding_batch_size,

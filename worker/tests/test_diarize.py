@@ -30,8 +30,10 @@ class DiarizeDeviceTests(unittest.TestCase):
         self.pipeline.to.side_effect = lambda device: setattr(self.pipeline, "device", device)
         annotation = MagicMock()
         annotation.itertracks.return_value = [(SimpleNamespace(start=0.25, end=1), None, "SPEAKER_00")]
+        annotation.labels.return_value = ["SPEAKER_00"]
         self.pipeline.return_value = SimpleNamespace(speaker_diarization=annotation,
-                                                    exclusive_speaker_diarization=annotation)
+                                                    exclusive_speaker_diarization=annotation,
+                                                    speaker_embeddings=[SimpleNamespace(tolist=lambda: [1.0, 0.0])])
         self.loader = MagicMock()
         self.loader.from_pretrained.return_value = self.pipeline
         audio_module = SimpleNamespace(Pipeline=self.loader)
@@ -54,6 +56,7 @@ class DiarizeDeviceTests(unittest.TestCase):
         self.assertEqual(output["regular"], [{"sample_start": 4000, "sample_end": 16000,
                                               "speaker": "SPEAKER_00"}])
         self.assertEqual(output["exclusive"], output["regular"])
+        self.assertEqual(output["speaker_embeddings"], [{"speaker": "SPEAKER_00", "vector": [1.0, 0.0]}])
 
     def test_auto_uses_cpu_when_mps_is_unavailable(self):
         self.torch.backends.mps.is_available.return_value = False

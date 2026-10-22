@@ -198,7 +198,7 @@ enum Artifacts {
         try require(provenance.schema_version == 1 && provenance.meeting_id == meeting.id
                     && provenance.revision_id == revision && provenance.run_id == transcript.run_id
                     && provenance.committed_audio_fingerprint == audioFingerprint(meeting.chunks)
-                    && provenance.preparation_version == 1 && [1, 2].contains(provenance.alignment_version),
+                    && provenance.preparation_version == 1 && (1...4).contains(provenance.alignment_version),
                     "Transcript provenance is incompatible with the retained audio.")
         return transcript
     }

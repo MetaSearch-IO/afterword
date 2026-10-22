@@ -40,7 +40,6 @@ meetings, or monitoring the microphone outside a session.
 ### Deferred
 
 - Live captions and streaming inference.
-- Persistent voice profiles and speaker matching across meetings.
 - Reliable separation of simultaneous voices sharing one microphone.
 - Meeting-platform integrations, participant roster extraction, and bots.
 - Automatic meeting detection, background all-day recording, and calendars.
@@ -234,8 +233,12 @@ segments at supported speaker boundaries. Preserve ambiguous or overlapping
 turns rather than presenting guessed identity as certainty.
 
 Manual renaming updates a meeting-local speaker-name map. Transcript segments
-reference stable speaker IDs, not copied display names. No voice enrollment or
-cross-meeting matching is performed in v1.
+reference stable speaker IDs, not copied display names. Local voice profiles
+can suggest stable anonymous labels across meetings when the pinned embedding
+model agrees with a prior profile. Uncertain matches receive a new Voice ID;
+person names remain manual and meeting-local. Deleting a meeting removes its
+profile. Deleting a meeting removes its profile. Deleting saved audio retains
+existing derived profiles and transcript labels, but prevents later backfill.
 
 ### Summarization
 
@@ -357,10 +360,11 @@ and the maximum validated meeting length remain unset. Record measured results
 before calling the app ready. Do not substitute cloud inference without a new
 product decision.
 
-V2 may add a local person registry and voice embeddings from user-confirmed
-segments, then suggest identities in later meetings. Matching must support an
-unknown result and correction. V1 stores meeting-local identities only; do not
-build speculative enrollment infrastructure now.
+A local person registry and user-confirmed identity enrollment remain deferred.
+The versioned per-meeting voice profile stores only derived embeddings and
+anonymous IDs. Future processing reuses embeddings already computed by
+diarization; backfilling an older meeting requires a separate, explicit pass
+over selected saved audio turns.
 
 ## 11. Primary references
 

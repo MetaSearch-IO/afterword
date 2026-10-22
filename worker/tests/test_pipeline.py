@@ -19,6 +19,49 @@ from afterword_worker.summary import extraction_identity, validate_extraction_ch
 
 
 class PipelineTests(unittest.TestCase):
+    def test_saved_voice_profile_labels_remote_speaker_from_previous_meeting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            parent = Path(folder)
+            current = parent / "00000000-0000-0000-0000-000000000001"
+            previous = parent / "00000000-0000-0000-0000-000000000002"
+            current.mkdir()
+            previous.mkdir()
+            args = self.fixture(current, remote=True)
+            meeting = json.loads((current / "meeting.json").read_text())
+            meeting["id"] = current.name
+            (current / "meeting.json").write_text(json.dumps(meeting))
+            prepared = json.loads((current / "work/run1/prepared.json").read_text())
+            prepared["meeting_id"] = current.name
+            (current / "work/run1/prepared.json").write_text(json.dumps(prepared))
+            runtime = json.loads((current / "runtime.json").read_text())
+            runtime["models"] = {"diarization": {"files": [{"path": str(current / "embedding/pytorch_model.bin"),
+                                                         "sha256": "f" * 64}]}}
+            (current / "runtime.json").write_text(json.dumps(runtime))
+            prior = {"schema_version": 1, "meeting_id": previous.name, "revision_id": "old", "run_id": "old",
+                     "model_fingerprint": "f" * 64,
+                     "profiles": [{"speaker_id": "remote-001", "voice_id": "a" * 32, "vector": [1.0, 0.0]}]}
+            (previous / "voice_profiles.json").write_text(json.dumps(prior))
+            segments = [{"source": "system", "sample_start": 0, "sample_end": 16000, "text": "Remote speech"}]
+            turn = {"sample_start": 0, "sample_end": 16000, "speaker": "A"}
+            turns = {"schema_version": 1, "regular": [turn], "exclusive": [turn],
+                     "speaker_embeddings": [{"speaker": "A", "vector": [0.9, 0.1]}],
+                     "mode": "community1", "status": "completed"}
+            notes = {key: [] for key in (*NOTE_FIELDS, "action_items")}
+            with contextlib.redirect_stdout(io.StringIO()), patch("afterword_worker.pipeline.transcribe", return_value=segments), \
+                 patch("afterword_worker.pipeline.diarize", return_value=turns), \
+                 patch("afterword_worker.pipeline.summarize", return_value=notes):
+                process(args, Control(args.run_id, watch_stdin=False))
+            transcript = json.loads((current / "revisions/revision1/transcript.json").read_text())
+            saved = json.loads((current / "voice_profiles.json").read_text())
+            self.assertEqual(transcript["speakers"][0], {"id": "remote-001", "source": "system", "label": "Voice AAAAAAAA"})
+            self.assertEqual(transcript["segments"][0]["speaker_id"], "remote-001")
+            self.assertEqual(saved["profiles"][0]["voice_id"], "a" * 32)
+            from afterword_worker.voice_profiles import load_prior_profiles
+            next_meeting = parent / "00000000-0000-0000-0000-000000000003"
+            next_meeting.mkdir()
+            self.assertIn({"voice_id": "a" * 32, "vector": saved["profiles"][0]["vector"]},
+                          load_prior_profiles(next_meeting, "f" * 64, 2))
+
     def test_broken_unrelated_work_entry_cannot_block_summary_retry(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

@@ -7,13 +7,14 @@ import wave
 
 from .artifacts import map_interval, read_json, relative, require
 from .protocol import WorkerError
+from .voice_profiles import unit_vector
 
 
 RATE = 16_000
 WINDOW = 300 * RATE
 OVERLAP = 2 * RATE
 ASR_VERSION = 6
-ALIGNMENT_VERSION = 3
+ALIGNMENT_VERSION = 4
 MODEL_WINDOW_SAMPLES = 30 * RATE
 VAD_OPTIONS = {"min_speech_ms": 100, "min_silence_ms": 400, "padding_ms": 100}
 ASR_BATCH_SIZE = 64
@@ -208,6 +209,19 @@ def validate_turns(value, frames: int):
             require(isinstance(turn, dict) and type(turn.get("sample_start")) is int
                     and type(turn.get("sample_end")) is int and 0 <= turn["sample_start"] < turn["sample_end"] <= frames
                     and isinstance(turn.get("speaker"), str) and turn["speaker"], "Invalid diarization turn.")
+    embeddings = value.get("speaker_embeddings", [])
+    require(isinstance(embeddings, list) and len(embeddings) <= 64, "Invalid speaker embedding inventory.")
+    labels = {turn["speaker"] for field in ("regular", "exclusive") for turn in value[field]}
+    seen = set()
+    dimension = None
+    for entry in embeddings:
+        require(isinstance(entry, dict) and set(entry) == {"speaker", "vector"}
+                and isinstance(entry["speaker"], str) and entry["speaker"] in labels
+                and entry["speaker"] not in seen, "Speaker embedding has an invalid label.")
+        vector = unit_vector(entry["vector"], dimension)
+        require(vector is not None, "Speaker embedding is invalid.")
+        dimension = len(vector)
+        seen.add(entry["speaker"])
     return value
 
 
@@ -286,11 +300,14 @@ def attribution(segment: dict, turns: dict):
     return None, "incomplete_speaker_timing", False
 
 
-def align(segments: list[dict], turns: dict, prepared: dict, meeting_id: str, revision_id: str, run_id: str):
+def align(segments: list[dict], turns: dict, prepared: dict, meeting_id: str, revision_id: str, run_id: str,
+          voice_labels: dict[str, str] | None = None):
     labels = sorted({turn["speaker"] for turn in turns["exclusive"]})
     speaker_ids = {label: f"remote-{index + 1:03d}" for index, label in enumerate(labels)}
     speakers = [{"id": "local", "source": "microphone", "label": "You"}] if any(s["source"] == "microphone" for s in segments) else []
-    speakers += [{"id": speaker_ids[label], "source": "system", "label": f"Speaker {index + 1}"} for index, label in enumerate(labels)]
+    speakers += [{"id": speaker_ids[label], "source": "system",
+                  "label": (voice_labels or {}).get(speaker_ids[label], f"Speaker {index + 1}")}
+                 for index, label in enumerate(labels)]
     sources = {source["source"]: source for source in prepared["sources"]}
     result = []
     for segment in segments:

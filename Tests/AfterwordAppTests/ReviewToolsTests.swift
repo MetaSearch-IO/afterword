@@ -35,6 +35,39 @@ final class ReviewToolsTests: XCTestCase {
         return ReviewExportSnapshot(meeting: meeting, transcript: transcript, summary: summary)
     }
 
+    func testVoiceLabelsFollowOnlyTheirRevisionOrCorrectionLineage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-voice-labels-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = MeetingStore(rootURL: root)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("meeting"), withIntermediateDirectories: true)
+        try store.save(try fixture().meeting)
+        func write(_ value: [String: Any], _ path: String) throws {
+            let url = try store.artifactURL(meetingID: "meeting", relativePath: path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: value).write(to: url)
+        }
+        let original = try fixture().transcript
+        try write(["schema_version": 1, "meeting_id": "meeting", "revision_id": "revision", "run_id": "run",
+                   "profiles": [["speaker_id": "remote", "voice_id": String(repeating: "a", count: 32)]],
+                   "model_fingerprint": String(repeating: "f", count: 64)], "voice_profiles.json")
+        XCTAssertEqual(try VoiceProfileLabels.load(store: store, meetingID: "meeting", transcript: original)["remote"], "Voice AAAAAAAA")
+        let child = Transcript(schema_version: 1, run_id: "edit", meeting_id: "meeting", revision_id: "child",
+                               segments: original.segments, speakers: original.speakers,
+                               coverage: original.coverage, warnings: original.warnings)
+        try write(["schema_version": 1], "revisions/child/provenance.json")
+        XCTAssertEqual(try VoiceProfileLabels.load(store: store, meetingID: "meeting", transcript: child), [:])
+        try write(["schema_version": 1, "run_id": "run", "meeting_id": "meeting", "revision_id": "revision",
+                   "speakers": [["id": "remote", "source": "system", "label": "Speaker 1"]], "segments": [],
+                   "coverage": [], "warnings": []], "revisions/revision/transcript.json")
+        try write(["schema_version": 1, "speaker_corrections": [["schema_version": 1,
+                   "revision_id": "child", "run_id": "edit", "parent_revision_id": "revision",
+                   "parent_summary_id": NSNull(), "parent_input_fingerprint": "fixture",
+                   "parent_transcript_sha256": "fixture", "parent_provenance_sha256": "fixture",
+                   "segment_ids": ["s2"], "speaker_id": "remote"]]], "revisions/child/provenance.json")
+        XCTAssertEqual(try VoiceProfileLabels.load(store: store, meetingID: "meeting", transcript: child)["remote"], "Voice AAAAAAAA")
+    }
+
     func testSearchFindsChineseCaseDiacriticsAndCurrentSpeakerNamesWithoutReordering() throws {
         let snapshot = try fixture()
         XCTAssertEqual(TranscriptSearch.matches(" RELEASE ", transcript: snapshot.transcript, names: snapshot.names), ["s1", "s3"])
@@ -169,6 +202,17 @@ final class ReviewToolsTests: XCTestCase {
             try store.save(changed)
             XCTAssertThrowsError(try ReviewExport.validateCurrent(saved, store: store), mutation)
         }
+        try store.save(initial.meeting)
+        try write(["schema_version": 1, "meeting_id": "meeting", "revision_id": "revision", "run_id": "run",
+                   "model_fingerprint": String(repeating: "f", count: 64),
+                   "profiles": [["speaker_id": "remote", "voice_id": String(repeating: "a", count: 32),
+                                 "vector": [1.0, 0.0]]]], "voice_profiles.json")
+        XCTAssertThrowsError(try ReviewExport.validateCurrent(saved, store: store))
+        var unnamed = initial.meeting
+        unnamed.speakerNames["revision"] = [:]
+        try store.save(unnamed)
+        let voiced = try ReviewExport.snapshot(store: store, meetingID: "meeting", expectedRevisionID: "revision", expectedSummaryID: "summary")
+        XCTAssertEqual(voiced.speakerName("remote"), "Voice AAAAAAAA")
         try store.save(initial.meeting)
         try Data("{}".utf8).write(to: summaryURL)
         XCTAssertThrowsError(try ReviewExport.snapshot(store: store, meetingID: "meeting", expectedRevisionID: "revision", expectedSummaryID: "summary"))

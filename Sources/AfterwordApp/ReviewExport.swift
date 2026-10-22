@@ -14,11 +14,12 @@ struct ReviewExportSnapshot {
     let meeting: Meeting
     let transcript: Transcript
     let summary: MeetingSummary?
+    var voiceLabels: [String: String] = [:]
     var names: [String: String] { meeting.speakerNames[transcript.revision_id] ?? [:] }
 
     func speakerName(_ id: String?) -> String {
         guard let id else { return "Unknown" }
-        return names[id] ?? transcript.speakers.first { $0.id == id }?.label ?? "Unknown"
+        return names[id] ?? voiceLabels[id] ?? transcript.speakers.first { $0.id == id }?.label ?? "Unknown"
     }
 }
 
@@ -36,7 +37,8 @@ enum ReviewExport {
             try Artifacts.validate(loaded, transcript: transcript, summaryID: id)
             summary = loaded
         }
-        let result = ReviewExportSnapshot(meeting: meeting, transcript: transcript, summary: summary)
+        let voiceLabels = (try? VoiceProfileLabels.load(store: store, meetingID: meetingID, transcript: transcript)) ?? [:]
+        let result = ReviewExportSnapshot(meeting: meeting, transcript: transcript, summary: summary, voiceLabels: voiceLabels)
         try validateCurrent(result, store: store)
         return result
     }
@@ -44,10 +46,12 @@ enum ReviewExport {
     static func validateCurrent(_ snapshot: ReviewExportSnapshot, store: MeetingStore) throws {
         let before = snapshot.meeting
         let now = try store.load(id: before.id)
+        let voiceLabels = (try? VoiceProfileLabels.load(store: store, meetingID: before.id, transcript: snapshot.transcript)) ?? [:]
         try Artifacts.require(now.activeRevisionID == before.activeRevisionID && now.activeSummaryID == before.activeSummaryID
             && now.title == before.title && now.startedAt == before.startedAt && now.intervals == before.intervals
             && now.speakerNames[snapshot.transcript.revision_id] == before.speakerNames[snapshot.transcript.revision_id]
-            && Artifacts.audioFingerprint(now.chunks) == Artifacts.audioFingerprint(before.chunks),
+            && Artifacts.audioFingerprint(now.chunks) == Artifacts.audioFingerprint(before.chunks)
+            && voiceLabels == snapshot.voiceLabels,
             "The meeting changed while choosing an export file. Export again to use the current transcript, notes and names.")
     }
 

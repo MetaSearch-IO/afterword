@@ -25,9 +25,11 @@ struct ReviewPane: View {
     @State private var searchNavigation = 0
     @State private var exporting = false
     @State private var inviteeNames: [String] = []
+    @State private var voiceLabels: [String: String] = [:]
     @FocusState private var searchFocused: Bool
 
     private var names: [String: String] { meeting.speakerNames[meeting.activeRevisionID ?? ""] ?? [:] }
+    private var displayNames: [String: String] { voiceLabels.merging(names) { _, manual in manual } }
     private var canProcessAudio: Bool { controller.canProcess(meeting) }
     private var canRegenerateNotes: Bool { controller.canProcess(meeting, summaryOnly: true) }
     private var canCorrect: Bool {
@@ -37,7 +39,7 @@ struct ReviewPane: View {
     }
     private var identity: String { "\(meeting.id)/\(meeting.activeRevisionID ?? "")/\(meeting.activeSummaryID ?? "")" }
     private var searchMatches: [String] {
-        transcript.map { TranscriptSearch.matches(searchQuery, transcript: $0, names: names) } ?? []
+        transcript.map { TranscriptSearch.matches(searchQuery, transcript: $0, names: displayNames) } ?? []
     }
 
     var body: some View {
@@ -242,11 +244,13 @@ struct ReviewPane: View {
         canUndoCorrection = false
         showSearch = false
         searchQuery = ""
+        voiceLabels = [:]
         loadInviteeNames()
         guard meeting.activeRevisionID != nil else { return }
         do {
             let loaded = try processing.loadTranscript(meeting)
             transcript = loaded
+            voiceLabels = (try? VoiceProfileLabels.load(store: controller.store, meetingID: meeting.id, transcript: loaded)) ?? [:]
             summary = try processing.loadSummary(meeting, transcript: loaded)
             correctionSpeaker = loaded.speakers.first { $0.source == .system }?.id ?? ""
             refreshUndo()
@@ -485,7 +489,7 @@ struct ReviewPane: View {
 
     private func speakerName(_ id: String?) -> String {
         guard let id else { return "Unknown" }
-        return names[id] ?? transcript?.speakers.first(where: { $0.id == id })?.label ?? "Unknown"
+        return displayNames[id] ?? transcript?.speakers.first(where: { $0.id == id })?.label ?? "Unknown"
     }
 
     private func timestamp(_ microseconds: Int64) -> String {

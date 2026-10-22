@@ -3,15 +3,15 @@ import XCTest
 @testable import AfterwordApp
 
 final class ArtifactRecoveryTests: XCTestCase {
-    func testOldAndVadPaddingAlignmentRevisionsRemainReadableButFutureVersionsDoNot() throws {
+    func testSupportedAlignmentRevisionsRemainReadableButFutureVersionsDoNot() throws {
         try fixture { store, meeting in
             try publish(store: store, meeting: meeting, summary: nil)
-            for version in [1, 2, 0, 3] {
+            for version in [1, 2, 3, 4, 0, 5] {
                 try write(["schema_version": 1, "run_id": "new-run", "meeting_id": meeting.id, "revision_id": "new-revision",
                            "input_fingerprint": "fixture", "committed_audio_fingerprint": Artifacts.audioFingerprint(meeting.chunks),
                            "preparation_version": 1, "alignment_version": version],
                           path: "revisions/new-revision/provenance.json", store: store, meeting: meeting)
-                if [1, 2].contains(version) {
+                if (1...4).contains(version) {
                     XCTAssertNoThrow(try Artifacts.loadRevision(store: store, meeting: meeting, revision: "new-revision"))
                 } else {
                     XCTAssertThrowsError(try Artifacts.loadRevision(store: store, meeting: meeting, revision: "new-revision"))
