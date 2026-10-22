@@ -177,6 +177,12 @@ struct ReviewPane: View {
                                         Text(timestamp(segment.start_us))
                                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                             .frame(width: 52, alignment: .leading)
+                                        Button { controller.play(segment, in: meeting) } label: { Image(systemName: "play.circle") }
+                                            .buttonStyle(.plain)
+                                            .foregroundStyle(.secondary)
+                                            .help("Play this segment's retained audio")
+                                            .accessibilityLabel("Play segment at \(timestamp(segment.start_us))")
+                                            .disabled(controller.activity != .idle || meeting.audioUnavailable)
                                         Text(speakerName(segment.speaker_id))
                                             .font(.subheadline.weight(.medium))
                                             .lineLimit(1)
@@ -191,12 +197,6 @@ struct ReviewPane: View {
                                                     .font(.caption).foregroundStyle(.secondary)
                                             }
                                         }
-                                        Button { controller.play(segment, in: meeting) } label: { Image(systemName: "play.circle") }
-                                            .buttonStyle(.plain)
-                                            .foregroundStyle(.secondary)
-                                            .help("Play this segment's retained audio")
-                                            .accessibilityLabel("Play segment at \(timestamp(segment.start_us))")
-                                            .disabled(controller.activity != .idle || meeting.audioUnavailable)
                                     }
                                     .padding(.vertical, 4)
                                     .padding(.horizontal, 2)
