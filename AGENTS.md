@@ -2,6 +2,12 @@
 
 ## Delivering app fixes
 
+- Once a feature or fix is confirmed working by relevant tests and, for UI
+  changes, a real app check, commit only its task files, integrate it into
+  `main`, and push `main` to `origin`. Fetch before pushing and use a normal
+  push; never force-push or include unrelated uncommitted changes. If the
+  remote has advanced or the push fails, reconcile safely or report the
+  blocker instead of claiming the change was published.
 - After an Afterword app fix builds successfully, update the Spotlight-indexed
   `~/Applications/Afterword.app` from the build containing that fix. A build in
   `.build/Afterword.app` alone is not delivered to the user.
