@@ -141,6 +141,22 @@ final class ProcessingQueueTests: XCTestCase {
     }
 
     @MainActor
+    func testQueuedProcessingKeepsItsSelectedDestination() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Destination")
+        var remoteEnabled = true
+        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+                                             remoteEnabled: { remoteEnabled })
+        processor.pause()
+        processor.start(meeting)
+        let queued = try fixture.store.load(id: meeting.id)
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: queued)?.remote, true)
+        remoteEnabled = false
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: queued)?.remote, true)
+    }
+
+    @MainActor
     func testRecordingWaitsForChildExitAndNewRecordingRunsBeforeDeferredWork() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
