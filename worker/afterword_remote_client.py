@@ -33,6 +33,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import select
 import shutil
 import sys
@@ -41,6 +42,11 @@ import tempfile
 import threading
 import time
 import urllib.parse
+
+try:
+    from afterword_worker.voice_profiles import assign_profiles, load_prior_profiles, save_profiles, unit_vector
+except ModuleNotFoundError:
+    from afterword_voice_profiles import assign_profiles, load_prior_profiles, save_profiles, unit_vector
 
 RETRY_SECONDS = 300
 TIMEOUT = 60
@@ -115,6 +121,10 @@ class RemoteError(Exception):
 
 
 class UploadCancelled(Exception):
+    pass
+
+
+class ArtifactRejected(Exception):
     pass
 
 
@@ -213,6 +223,52 @@ def apply_changes(root: Path, data, args=None) -> list[str]:
         return [name for _, _, name in changes]
 
 
+def localize_profiles(root: Path, candidate: Path):
+    if candidate.is_symlink() or candidate.stat().st_size > 1_048_576:
+        raise ValueError("Remote voice profile file is invalid.")
+    value = json.loads(candidate.read_text())
+    if not isinstance(value, dict) or value.get("schema_version") != 1 or value.get("meeting_id") != root.name \
+            or not isinstance(value.get("revision_id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value["revision_id"]) \
+            or not isinstance(value.get("run_id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value["run_id"]) \
+            or not isinstance(value.get("model_fingerprint"), str) \
+            or not re.fullmatch(r"[0-9a-f]{64}", value["model_fingerprint"]) \
+            or not isinstance(value.get("profiles"), list) or len(value["profiles"]) > 64:
+        raise ValueError("Remote voice profiles do not match this meeting.")
+    transcript_path = root / "revisions" / value["revision_id"] / "transcript.json"
+    if transcript_path.is_symlink() or transcript_path.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError("Remote transcript is invalid.")
+    transcript = json.loads(transcript_path.read_text())
+    if not isinstance(transcript, dict) or transcript.get("meeting_id") != root.name \
+            or transcript.get("revision_id") != value["revision_id"] \
+            or transcript.get("run_id") != value["run_id"]:
+        raise ValueError("Remote voice profiles do not match the transcript.")
+    current_path = root / "voice_profiles.json"
+    if current_path.is_symlink():
+        raise ValueError("Local voice profile file is invalid.")
+    if current_path.is_file():
+        current = json.loads(current_path.read_text())
+        if current.get("revision_id") == value["revision_id"] and current.get("run_id") == value["run_id"]:
+            return
+    speakers = {item.get("id") for item in transcript.get("speakers", [])
+                if isinstance(item, dict) and item.get("source") == "system"}
+    vectors = {}
+    dimension = None
+    for profile in value["profiles"]:
+        if not isinstance(profile, dict) or profile.get("speaker_id") not in speakers \
+                or profile["speaker_id"] in vectors:
+            raise ValueError("Remote voice profile speaker is invalid.")
+        vector = unit_vector(profile.get("vector"), dimension)
+        if vector is None:
+            raise ValueError("Remote voice profile vector is invalid.")
+        dimension = len(vector)
+        vectors[profile["speaker_id"]] = vector
+    if vectors:
+        prior = load_prior_profiles(root, value["model_fingerprint"], len(next(iter(vectors.values()))))
+        mapped = assign_profiles(root.name, value["revision_id"], value["run_id"],
+                                 value["model_fingerprint"], vectors, prior)
+        save_profiles(root, mapped)
+
+
 class Run:
     def __init__(self, args, remote: Remote):
         self.args, self.remote = args, remote
@@ -292,7 +348,12 @@ class Run:
         with tempfile.TemporaryFile() as stream:
             self.remote.call("GET", f"/v1/jobs/{self.job}/changes", timeout=600, output=stream)
             stream.seek(0)
-            apply_changes(self.root, stream, self.args)
+            try:
+                changes = apply_changes(self.root, stream, self.args)
+                if f"work/{self.args.run_id}/remote_voice_profiles.json" in changes:
+                    localize_profiles(self.root, self.root / "work" / self.args.run_id / "remote_voice_profiles.json")
+            except (OSError, ValueError, KeyError, TypeError, tarfile.TarError) as error:
+                raise ArtifactRejected(str(error)) from error
 
     def preflight(self):
         health = json.loads(self.remote.call("GET", "/v1/health", timeout=6))
@@ -351,6 +412,8 @@ class Run:
                 status = json.loads(self.remote.call("GET", f"/v1/jobs/{self.job}"))
                 if status["state"] in {"done", "failed", "cancelled"} and status["events"] <= index:
                     return 1, self.failed_event("The remote worker exited without a result.", "processing")
+            except ArtifactRejected as error:
+                return 1, self.failed_event(f"Remote output was rejected: {error}", "remote_artifact")
             except (OSError, http.client.HTTPException, RemoteError, ValueError, TypeError, KeyError):
                 if self.cancelled.is_set():
                     return 2, {"protocol_version": 1, "run_id": self.args.run_id,

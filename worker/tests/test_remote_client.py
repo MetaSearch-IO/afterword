@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from afterword_remote_client import (CancellableBody, Remote, Run, UploadCancelled, WORKER_PROTOCOL,
-                                     apply_changes, meeting_archive)
+                                     apply_changes, localize_profiles, meeting_archive)
 
 
 class RemoteClientTests(unittest.TestCase):
@@ -177,6 +177,32 @@ class RemoteClientTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside this processing run"):
                 apply_changes(root, output.getvalue(), args)
             self.assertFalse((root / "revisions/next/transcript.json").exists())
+
+    def test_remote_voice_vector_matches_prior_meeting_locally(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            current = base / "00000000-0000-0000-0000-000000000001"
+            prior = base / "00000000-0000-0000-0000-000000000002"
+            (current / "work/run").mkdir(parents=True)
+            (current / "revisions/next").mkdir(parents=True)
+            prior.mkdir()
+            (prior / "voice_profiles.json").write_text(json.dumps({"schema_version": 1,
+                "meeting_id": prior.name, "revision_id": "old", "run_id": "old",
+                "model_fingerprint": "f" * 64, "profiles": [{"speaker_id": "remote-001",
+                    "voice_id": "a" * 32, "vector": [1.0, 0.0]}]}))
+            (current / "revisions/next/transcript.json").write_text(json.dumps({"schema_version": 1,
+                "meeting_id": current.name, "revision_id": "next", "run_id": "run",
+                "speakers": [{"id": "remote-001", "source": "system"}]}))
+            candidate = current / "work/run/remote_voice_profiles.json"
+            candidate.write_text(json.dumps({"schema_version": 1, "meeting_id": current.name,
+                "revision_id": "next", "run_id": "run", "model_fingerprint": "f" * 64,
+                "profiles": [{"speaker_id": "remote-001", "voice_id": "b" * 32,
+                              "vector": [0.9, 0.1]}]}))
+            localize_profiles(current, candidate)
+            saved = json.loads((current / "voice_profiles.json").read_text())
+            self.assertEqual(saved["profiles"][0]["voice_id"], "a" * 32)
+            localize_profiles(current, candidate)
+            self.assertEqual(json.loads((current / "voice_profiles.json").read_text()), saved)
 
     def test_http_job_roundtrip_uploads_minimal_inputs_and_pulls_before_events(self):
         with tempfile.TemporaryDirectory() as folder:

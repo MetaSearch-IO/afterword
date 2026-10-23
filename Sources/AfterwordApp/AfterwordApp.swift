@@ -34,7 +34,7 @@ private struct RemoteProcessingSettings: View {
             Text("Off by default. When enabled, prepared audio and the inputs needed for processing are sent to Hyperion over your tailnet. Raw capture chunks stay on this Mac.")
             Text("An updated Hyperion service is required. If it is not ready, no meeting data is uploaded and processing fails.")
             Text("The choice is saved when a meeting is queued. Changing it affects new processing requests, not a queued or running job.")
-            Text("If Hyperion is unavailable, turn this off and retry the meeting locally. Voice IDs may differ because Hyperion cannot see profiles from your earlier meetings.")
+            Text("If Hyperion is unavailable, turn this off and retry locally. Voice IDs are matched against earlier meetings on this Mac when the embedding model agrees.")
         }
         .font(.callout)
         .padding(24)

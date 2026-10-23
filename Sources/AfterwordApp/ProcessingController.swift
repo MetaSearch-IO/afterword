@@ -327,13 +327,14 @@ final class ProcessingController: ObservableObject {
                     arguments += ["--prepared", preparedPath, "--language", meeting.asrLanguage ?? "auto", "--transcript-first"]
                 }
                 guard !cancelled else { throw CancellationError() }
-                arguments.insert(contentsOf: remote ? [remoteClientURL.path] : ["-m", "afterword_worker"], at: 0)
+                arguments.insert(contentsOf: remote ? ["-B", remoteClientURL.path] : ["-m", "afterword_worker"], at: 0)
                 let worker = WorkerProcess(runID: run)
                 self.worker = worker
                 let result = try await worker.run(executable: URL(fileURLWithPath: runtime.python), arguments: arguments,
                                                   directory: remote ? remoteClientURL.deletingLastPathComponent()
                                                       : URL(fileURLWithPath: runtime.worker_root),
-                                                  environment: remote ? ["AFTERWORD_REMOTE": RemoteProcessing.endpoint] : [:]) { [weak self] event in
+                                                  environment: remote ? ["AFTERWORD_REMOTE": RemoteProcessing.endpoint,
+                                                                         "PYTHONDONTWRITEBYTECODE": "1"] : [:]) { [weak self] event in
                     await self?.receive(event, request: request)
                 }
                 self.worker = nil
