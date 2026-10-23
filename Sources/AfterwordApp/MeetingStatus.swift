@@ -39,7 +39,7 @@ struct MeetingStatus {
         switch meeting.processingStatus {
         case "processing":
             return .init(title: stageTitle(stage ?? meeting.processingStage), symbol: "gearshape.2", tone: .active,
-                         explanation: "Processing saved audio locally. Saved results remain available while work continues.")
+                         explanation: "Processing saved audio. Saved results remain available while work continues.")
         case "queued":
             return .init(title: "Queued", symbol: "clock", tone: .neutral, explanation: "Waiting for recording or another processing job to finish.")
         case "paused":

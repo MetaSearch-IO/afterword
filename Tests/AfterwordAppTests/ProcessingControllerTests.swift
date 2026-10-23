@@ -55,6 +55,19 @@ final class ProcessingControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteOptInUsesClientProtocolWithoutLocalModels() async throws {
+        try await runFixture(terminal: "failure", deferredModelsMissing: true, remote: true)
+    }
+
+    @MainActor
+    func testUnconfirmedRemoteCleanupDisablesFutureRemoteProcessing() async throws {
+        UserDefaults.standard.set(true, forKey: RemoteProcessing.preferenceKey)
+        defer { UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey) }
+        try await runFixture(terminal: "cleanup-failure", remote: true)
+        XCTAssertFalse(UserDefaults.standard.bool(forKey: RemoteProcessing.preferenceKey))
+    }
+
+    @MainActor
     func testEarlyTranscriptSurvivesSpeakerLabelingCancellation() async throws {
         try await runFixture(terminal: "labeling-cancelled", earlyTranscript: true)
     }
@@ -71,7 +84,8 @@ final class ProcessingControllerTests: XCTestCase {
 
     @MainActor
     private func runFixture(terminal: String, language: String? = nil, renameDuringProcessing: Bool = false,
-                            earlyTranscript: Bool = false, deferredModelsMissing: Bool = false) async throws {
+                            earlyTranscript: Bool = false, deferredModelsMissing: Bool = false,
+                            remote: Bool = false) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-processing-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -96,7 +110,9 @@ final class ProcessingControllerTests: XCTestCase {
         let module = directory.appendingPathComponent("afterword_worker")
         try FileManager.default.createDirectory(at: module, withIntermediateDirectories: true)
         let script = """
-        import json, pathlib, sys
+        import json, os, pathlib, sys
+        assert os.environ.get('AFTERWORD_REMOTE') == \(remote ? "'\(RemoteProcessing.endpoint)'" : "None")
+        assert pathlib.Path(__file__).name == '\(remote ? "remote_client.py" : "__main__.py")'
         def arg(name): return sys.argv[sys.argv.index(name)+1]
         assert arg('--language') == '\(language ?? "auto")'
         assert '--transcript-first' in sys.argv
@@ -144,11 +160,16 @@ final class ProcessingControllerTests: XCTestCase {
         if '\(terminal)' in ('failure', 'final-after-preview'):
             event('failed',stage='summary',code='fixture',message='Deliberate summary failure')
             sys.exit(1)
+        if '\(terminal)' == 'cleanup-failure':
+            event('failed',stage='summary',code='remote_cleanup',message='Delete failed')
+            sys.exit(1)
         if '\(terminal)' == 'missing-summary':
             event('completed',revision_id=revision,transcript_path=f'revisions/{revision}/transcript.json',summary_id=None,summary_path=None)
         sys.exit(0)
         """
         try Data(script.utf8).write(to: module.appendingPathComponent("__main__.py"))
+        let remoteClientURL = directory.appendingPathComponent("remote_client.py")
+        if remote { try Data(script.utf8).write(to: remoteClientURL) }
         let runtimeURL = directory.appendingPathComponent("runtime.json")
         var runtime: [String: Any] = ["schema_version": 1, "python": "/usr/bin/python3", "worker_root": directory.path,
             "whisper_cli": "/usr/bin/python3", "vad_cli": "/usr/bin/python3", "llama_completion": "/usr/bin/python3", "llama_tokenize": "/usr/bin/python3",
@@ -160,7 +181,8 @@ final class ProcessingControllerTests: XCTestCase {
             runtime["llama_tokenize"] = directory.appendingPathComponent("missing-tokenizer").path
         }
         try JSONSerialization.data(withJSONObject: runtime).write(to: runtimeURL)
-        let processor = ProcessingController(store: store, runtimeURL: runtimeURL)
+        let processor = ProcessingController(store: store, runtimeURL: runtimeURL,
+                                             remoteEnabled: { remote }, remoteClientURL: remoteClientURL)
         var didRename = false
         var renameError: Error?
         processor.changed = { [weak processor] in
@@ -174,6 +196,9 @@ final class ProcessingControllerTests: XCTestCase {
         while processor.isBusy && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertFalse(processor.isBusy)
         let accepted = try store.load(id: meeting.id)
+        let savedRequest = try JSONDecoder().decode(ProcessingRequest.self, from: Data(contentsOf:
+            store.artifactURL(meetingID: meeting.id, relativePath: "work/\(accepted.processingRunID!)/request.json")))
+        XCTAssertEqual(savedRequest.remote, remote)
         XCTAssertNotNil(accepted.activeRevisionID)
         XCTAssertNil(accepted.activeSummaryID)
         XCTAssertEqual(accepted.processingStatus, terminal == "labeling-cancelled" ? "cancelled" : "failed")

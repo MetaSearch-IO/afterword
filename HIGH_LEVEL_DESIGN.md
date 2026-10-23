@@ -11,8 +11,10 @@ or benchmarked. This document is the handoff for the implementation agent.
 
 Afterword is a local macOS app that records both sides of a meeting and turns
 the recording into a speaker-labeled transcript and useful meeting notes.
-The user normally wears headphones. All meeting audio and inference remain
-on the Mac after initial dependency and model setup.
+The user normally wears headphones. Recording and inference stay on the Mac by
+default. An optional remote-processing setting can send prepared audio and the
+current run's inputs to a tailnet-only server; raw capture chunks stay on the
+Mac.
 
 The primary flow is:
 
@@ -307,10 +309,13 @@ on stderr. Errors need a stage and useful explanation. Keep meeting content out
 of routine logs. The Swift app observes process exit and checks expected
 artifacts; exit code zero alone is insufficient proof of success.
 
-No cloud services, remote API calls, or telemetry carrying meeting content are
-part of this design. Verify offline operation after installation. Community-1
-initial setup requires accepting its model conditions and downloading weights;
-make this a documented setup prerequisite. Audit dependency telemetry settings.
+The default local path must work offline and make no remote calls carrying
+meeting content. Remote processing requires explicit opt-in, a compatible
+worker on the tailnet server, a narrow upload of the current run's inputs,
+and verified remote cleanup. Do not silently retry locally after remote
+artifacts have been published. Community-1 initial setup requires accepting
+its model conditions and downloading weights; make this a documented setup
+prerequisite. Audit dependency telemetry settings.
 
 ## 9. Validation and implementation order
 
@@ -357,8 +362,8 @@ Intel support is not yet validated.
 
 Exact model weights, quantization, dependency versions, processing-time goals,
 and the maximum validated meeting length remain unset. Record measured results
-before calling the app ready. Do not substitute cloud inference without a new
-product decision.
+before calling the app ready. Remote processing remains experimental until a
+consented recording is compared with local output and cleanup is verified.
 
 A local person registry and user-confirmed identity enrollment remain deferred.
 The versioned per-meeting voice profile stores only derived embeddings and

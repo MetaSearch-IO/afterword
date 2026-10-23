@@ -19,23 +19,29 @@ struct RuntimeConfiguration: Decodable, Sendable {
             .appendingPathComponent("Afterword/runtime.json")
     }
 
-    static func load(from url: URL = Self.url, summaryOnly: Bool) throws -> RuntimeConfiguration {
+    static func load(from url: URL = Self.url, summaryOnly: Bool, remote: Bool = false) throws -> RuntimeConfiguration {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw CaptureFailure(message: "Local model setup is missing: \(url.path). Run make model-setup in the development folder, then retry.")
         }
         let config = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
         try Artifacts.require(config.schema_version == 1, "Unsupported runtime configuration version.")
-        let executables = [config.python] + (summaryOnly
+        let executables = [config.python] + (remote ? [] : summaryOnly
             ? [config.llama_completion, config.llama_tokenize] : [config.whisper_cli, config.vad_cli])
         for path in executables {
             try Artifacts.require(path.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: path), "Missing local executable: \(path)")
         }
-        let assets = [config.worker_root] + (summaryOnly ? [config.summary_model] : [config.asr_model, config.vad_model])
+        let assets = remote ? [] : [config.worker_root] + (summaryOnly ? [config.summary_model] : [config.asr_model, config.vad_model])
         for path in assets {
             try Artifacts.require(path.hasPrefix("/") && FileManager.default.fileExists(atPath: path), "Missing local model or worker: \(path)")
         }
         return config
     }
+}
+
+enum RemoteProcessing {
+    static let preferenceKey = "remoteProcessingEnabled"
+    static let endpoint = "http://100.92.212.58:8790"
+    static var clientURL: URL { Bundle.main.resourceURL!.appendingPathComponent("afterword_remote_client.py") }
 }
 
 struct ProcessingRequest: Codable {
@@ -50,12 +56,13 @@ struct ProcessingRequest: Codable {
     let audioFingerprint: String
     let language: String
     let nameMapRevision: String
+    let remote: Bool?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version", meetingID = "meeting_id", run = "run_id"
         case revision = "revision_id", summary = "summary_id", summaryOnly = "summary_only"
         case baseRevision = "base_revision_id", baseSummary = "base_summary_id"
-        case audioFingerprint = "audio_fingerprint", language, nameMapRevision = "name_map_revision"
+        case audioFingerprint = "audio_fingerprint", language, nameMapRevision = "name_map_revision", remote
     }
 
     static func load(store: MeetingStore, meeting: Meeting) throws -> Self? {
@@ -114,16 +121,20 @@ final class ProcessingController: ObservableObject {
     @Published private(set) var progressPhase: String?
     @Published private(set) var stage: String?
     @Published private(set) var meetingID: String?
+    @Published private(set) var processingRemotely = false
     @Published var message: String?
     var changed: (() -> Void)?
     private let store: MeetingStore
     private let runtimeURL: URL
+    private let remoteEnabled: () -> Bool
+    private let remoteClientURL: URL
     private var task: Task<Void, Never>?
     private var preparation: Task<String, Error>?
     private var worker: WorkerProcess?
     private var runID: String?
     private var cancelled = false
     private var blocked = false
+    private var remoteCleanupUnconfirmed = false
     private var validationError: String?
     private var cleanupProbe: WorkerProcess?
     private var queue: [Request] = []
@@ -160,9 +171,13 @@ final class ProcessingController: ObservableObject {
         return MeetingStatus.stageTitle(stage)
     }
 
-    init(store: MeetingStore, runtimeURL: URL = RuntimeConfiguration.url) {
+    init(store: MeetingStore, runtimeURL: URL = RuntimeConfiguration.url,
+         remoteEnabled: @escaping () -> Bool = { UserDefaults.standard.bool(forKey: RemoteProcessing.preferenceKey) },
+         remoteClientURL: URL = RemoteProcessing.clientURL) {
         self.store = store
         self.runtimeURL = runtimeURL
+        self.remoteEnabled = remoteEnabled
+        self.remoteClientURL = remoteClientURL
     }
 
     func start(_ original: Meeting, summaryOnly: Bool = false, preferred: Bool = false) {
@@ -193,7 +208,8 @@ final class ProcessingController: ObservableObject {
                               summary: UUID().uuidString.lowercased(), summaryOnly: summaryOnly,
                               baseRevision: meeting.activeRevisionID, baseSummary: meeting.activeSummaryID,
                               audioFingerprint: Artifacts.audioFingerprint(meeting.chunks),
-                              language: meeting.asrLanguage ?? "auto", nameMapRevision: try Artifacts.nameMapRevision(names))
+                              language: meeting.asrLanguage ?? "auto", nameMapRevision: try Artifacts.nameMapRevision(names),
+                              remote: remoteEnabled())
         let directory = try store.artifactURL(meetingID: meeting.id, relativePath: "work/\(request.run)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(request).write(to: directory.appendingPathComponent("request.json"), options: .atomic)
@@ -245,11 +261,14 @@ final class ProcessingController: ObservableObject {
 
     private func launch(_ request: Request) {
         let run = request.run, revision = request.revision, summary = request.summary, summaryOnly = request.summaryOnly
+        let remote = request.remote ?? false
         activeRequest = request
+        processingRemotely = remote
         isBusy = true
         isCancelling = false
         cancelled = false
         blocked = false
+        remoteCleanupUnconfirmed = false
         validationError = nil
         cancellationReason = nil
         runID = run
@@ -278,7 +297,11 @@ final class ProcessingController: ObservableObject {
                     message = meeting.processingError
                     throw CaptureFailure(message: "No retained audio is available.")
                 }
-                let runtime = try RuntimeConfiguration.load(from: runtimeURL, summaryOnly: summaryOnly)
+                let runtime = try RuntimeConfiguration.load(from: runtimeURL, summaryOnly: summaryOnly, remote: remote)
+                if remote {
+                    try Artifacts.require(FileManager.default.fileExists(atPath: remoteClientURL.path),
+                                          "Remote processing client is missing from this app build.")
+                }
                 meeting.processingStatus = "processing"
                 meeting.processingStage = "preparing"
                 meeting.processingError = nil
@@ -286,7 +309,7 @@ final class ProcessingController: ObservableObject {
                 try store.save(meeting)
                 changed?()
                 let namesPath = "work/\(run)/names.json"
-                var arguments = ["-m", "afterword_worker", "process", "--meeting", try store.meetingURL(id: meeting.id).path,
+                var arguments = ["process", "--meeting", try store.meetingURL(id: meeting.id).path,
                                  "--runtime", runtimeURL.path, "--run-id", run, "--revision-id", revision,
                                  "--summary-id", summary, "--names", namesPath, "--progress-events"]
                 if summaryOnly {
@@ -304,10 +327,13 @@ final class ProcessingController: ObservableObject {
                     arguments += ["--prepared", preparedPath, "--language", meeting.asrLanguage ?? "auto", "--transcript-first"]
                 }
                 guard !cancelled else { throw CancellationError() }
+                arguments.insert(contentsOf: remote ? [remoteClientURL.path] : ["-m", "afterword_worker"], at: 0)
                 let worker = WorkerProcess(runID: run)
                 self.worker = worker
                 let result = try await worker.run(executable: URL(fileURLWithPath: runtime.python), arguments: arguments,
-                                                  directory: URL(fileURLWithPath: runtime.worker_root)) { [weak self] event in
+                                                  directory: remote ? remoteClientURL.deletingLastPathComponent()
+                                                      : URL(fileURLWithPath: runtime.worker_root),
+                                                  environment: remote ? ["AFTERWORD_REMOTE": RemoteProcessing.endpoint] : [:]) { [weak self] event in
                     await self?.receive(event, request: request)
                 }
                 self.worker = nil
@@ -318,9 +344,16 @@ final class ProcessingController: ObservableObject {
                 }
                 if let error = result.error { throw CaptureFailure(message: error) }
                 if let validationError { throw CaptureFailure(message: validationError) }
+                if remote && (result.terminal?.code == "remote_cleanup"
+                              || (cancelled && !(result.exitStatus == 2 && result.terminal?.type == "cancelled"))) {
+                    remoteCleanupUnconfirmed = true
+                    UserDefaults.standard.set(false, forKey: RemoteProcessing.preferenceKey)
+                    throw CaptureFailure(message: "Remote job cleanup was not confirmed. Remote processing has been turned off; ask the Hyperion administrator to check the job before retrying remotely.")
+                }
                 if cancelled || result.terminal?.type == "cancelled" { throw CancellationError() }
                 guard result.exitStatus == 0, let terminal = result.terminal, terminal.type == "completed" else {
-                    throw CaptureFailure(message: result.terminal?.message ?? "Worker exited without a valid completion (exit \(result.exitStatus)).")
+                    let failure = result.terminal?.message ?? "Worker exited without a valid completion (exit \(result.exitStatus))."
+                    throw CaptureFailure(message: remote ? failure + " Turn off remote processing in Settings and retry locally." : failure)
                 }
                 try Artifacts.require(terminal.revision_id == revision, "Worker completed a different transcript revision.")
                 try acceptTranscript(request: request, revision: revision, run: summaryOnly ? nil : run,
@@ -346,7 +379,7 @@ final class ProcessingController: ObservableObject {
             } catch {
                 preparation = nil
                 worker = nil
-                let wasCancelled = !blocked && (cancelled || error is CancellationError)
+                let wasCancelled = !blocked && !remoteCleanupUnconfirmed && (cancelled || error is CancellationError)
                 message = wasCancelled ? "Processing cancelled. Saved audio and accepted artifacts remain available." : error.localizedDescription
                 if var meeting = try? store.load(id: request.meetingID), meeting.processingRunID == run {
                     if meeting.activeRevisionID == run, (try? loadTranscript(meeting).speakerLabelsPending) == true {
@@ -527,6 +560,7 @@ final class ProcessingController: ObservableObject {
         clockTask = nil
         if !blocked {
             isBusy = false; isCancelling = false; setStage(nil); meetingID = nil; runID = nil
+            processingRemotely = false
             activeRequest = nil
         }
         task = nil

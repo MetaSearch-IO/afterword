@@ -46,7 +46,7 @@ final class WorkerProcess: @unchecked Sendable {
 
     init(runID: String) { self.runID = runID }
 
-    func run(executable: URL, arguments: [String], directory: URL,
+    func run(executable: URL, arguments: [String], directory: URL, environment overrides: [String: String] = [:],
              event: @escaping @Sendable (WorkerEvent) async -> Void) async throws -> WorkerResult {
         let process = Process()
         let exited = DispatchSemaphore(value: 0)
@@ -68,6 +68,8 @@ final class WorkerProcess: @unchecked Sendable {
         environment["PYANNOTE_METRICS_ENABLED"] = "0"
         environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
         environment["PYTHONPATH"] = directory.path
+        environment.removeValue(forKey: "AFTERWORD_REMOTE")
+        environment.merge(overrides) { _, override in override }
         process.environment = environment
         try process.run()
         lock.withLock { self.process = process; control = input.fileHandleForWriting; running = true }
