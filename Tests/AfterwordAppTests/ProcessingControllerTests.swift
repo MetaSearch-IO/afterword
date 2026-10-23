@@ -68,6 +68,45 @@ final class ProcessingControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveRemoteSyntheticSilencePublishesValidatedTranscript() async throws {
+        guard ProcessInfo.processInfo.environment["AFTERWORD_REMOTE_LIVE_TEST"] == "1" else {
+            throw XCTSkip("Enable only for a synthetic run against the live Hyperion service.")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-remote-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MeetingStore(rootURL: directory.appendingPathComponent("meetings"))
+        var meeting = try store.create(title: "Synthetic silence")
+        meeting.captureState = .stopped
+        meeting.intervals = [CaptureInterval(generation: 0, startUS: 0, endUS: 2_000_000)]
+        try store.save(meeting)
+        let partial = try store.beginChunk(meetingID: meeting.id, chunkID: "synthetic")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32_000)!
+        buffer.frameLength = 32_000
+        buffer.floatChannelData![0].initialize(repeating: 0, count: 32_000)
+        do {
+            let audio = try AVAudioFile(forWriting: partial.appendingPathComponent("audio.caf"), settings: format.settings)
+            try audio.write(from: buffer)
+        }
+        meeting = try store.commitChunk(meetingID: meeting.id, descriptor: ChunkDescriptor(
+            id: "synthetic", source: .microphone, generation: 0, startUS: 0, frameCount: 32_000,
+            sampleRate: 16_000, channelCount: 1, relativePath: "audio/synthetic/audio.caf"))
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let client = root.appendingPathComponent("worker/afterword_remote_client.py")
+        let processor = ProcessingController(store: store, remoteEnabled: { true }, remoteClientURL: client)
+        processor.start(meeting)
+        let deadline = Date().addingTimeInterval(120)
+        while processor.isBusy && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
+        XCTAssertFalse(processor.isBusy)
+        let accepted = try store.load(id: meeting.id)
+        XCTAssertEqual(accepted.processingStatus, "completed", accepted.processingError ?? "")
+        XCTAssertNil(accepted.activeSummaryID)
+        XCTAssertTrue(try processor.loadTranscript(accepted).segments.isEmpty)
+    }
+
+    @MainActor
     func testEarlyTranscriptSurvivesSpeakerLabelingCancellation() async throws {
         try await runFixture(terminal: "labeling-cancelled", earlyTranscript: true)
     }
