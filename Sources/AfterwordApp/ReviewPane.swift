@@ -26,6 +26,7 @@ struct ReviewPane: View {
     @State private var exporting = false
     @State private var inviteeNames: [String] = []
     @State private var voiceLabels: [String: String] = [:]
+    @AppStorage(RemoteProcessing.preferenceKey) private var remoteEnabled = true
     @FocusState private var searchFocused: Bool
 
     private var names: [String: String] { meeting.speakerNames[meeting.activeRevisionID ?? ""] ?? [:] }
@@ -58,6 +59,10 @@ struct ReviewPane: View {
                 }))
                 .disabled(!canProcessAudio)
             Text("Language changes apply to the next full transcription. Regenerating notes reuses the current transcript.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(remoteEnabled
+                 ? "Hyperion is selected. Full processing sends prepared audio; regenerating notes sends the transcript. Change this in Settings before queuing."
+                 : "This Mac is selected for new processing jobs. Change this in Settings to use Hyperion.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 if meeting.activeRevisionID == nil {

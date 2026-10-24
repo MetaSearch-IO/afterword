@@ -19,6 +19,11 @@ final class ProcessingQueueTests: XCTestCase {
             let script = """
             import json, os, pathlib, signal, subprocess, sys
             def arg(name): return sys.argv[sys.argv.index(name)+1]
+            if sys.argv[1] == 'health':
+                run = arg('--run-id')
+                print(json.dumps(dict(protocol_version=1,run_id=run,type='started')),flush=True)
+                print(json.dumps(dict(protocol_version=1,run_id=run,type='completed')),flush=True)
+                sys.exit(0)
             root = pathlib.Path(arg('--meeting'))
             run, revision = arg('--run-id'), arg('--revision-id')
             config = json.loads((root/'fixture.json').read_text())
@@ -56,6 +61,9 @@ final class ProcessingQueueTests: XCTestCase {
                     event('stage_completed',stage='transcript' if preview else 'alignment',revision_id=target,
                         transcript_path=f'revisions/{target}/transcript.json',provenance_path=f'revisions/{target}/provenance.json')
             event('stage_started',stage='summary' if config.get('publish') == 'final' else 'asr')
+            if config.get('cleanup_fail'):
+                event('failed',stage='asr',code='remote_cleanup',message='Delete not confirmed')
+                sys.exit(1)
             if config.get('progress'):
                 import time
                 assert '--progress-events' in sys.argv
@@ -141,6 +149,11 @@ final class ProcessingQueueTests: XCTestCase {
     }
 
     @MainActor
+    private func local(_ fixture: Fixture) -> ProcessingController {
+        ProcessingController(store: fixture.store, runtimeURL: fixture.runtime, remoteEnabled: { false })
+    }
+
+    @MainActor
     func testQueuedProcessingKeepsItsSelectedDestination() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
@@ -157,12 +170,171 @@ final class ProcessingQueueTests: XCTestCase {
     }
 
     @MainActor
+    func testOlderQueuedRequestWithoutDestinationStaysLocalAfterRestore() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Older local request")
+        let original = local(fixture)
+        original.pause()
+        original.start(meeting)
+        let saved = try fixture.store.load(id: meeting.id)
+        let url = try fixture.store.artifactURL(meetingID: meeting.id,
+            relativePath: "work/\(saved.processingRunID!)/request.json")
+        var snapshot = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        snapshot.removeValue(forKey: "remote")
+        try JSONSerialization.data(withJSONObject: snapshot).write(to: url)
+        let restored = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true })
+        restored.restoreQueue(from: [saved])
+        XCTAssertTrue(restored.isPaused)
+        XCTAssertEqual(restored.queuedCount, 1)
+        let queued = try fixture.store.load(id: meeting.id)
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: queued)?.remote, false)
+    }
+
+    @MainActor
+    func testUnavailableHyperionRetriesBeforePreparingAudioAndEventuallyRuns() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Offline then online", wait: false)
+        var attempts = 0
+        var delays: [Int] = []
+        let client = fixture.directory.appendingPathComponent("afterword_worker/__main__.py")
+        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true }, remoteAvailability: {
+                attempts += 1
+                return attempts < 3 ? .unavailable : .ready
+            }, retryDelay: { attempt in delays.append(attempt); return 0.05 }, remoteClientURL: client)
+        processor.start(meeting)
+        try await waitFor { attempts >= 1 && !processor.isBusy && processor.queuedCount == 1 }
+        let waiting = try fixture.store.load(id: meeting.id)
+        XCTAssertEqual(waiting.processingStatus, "queued")
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: waiting)?.remote, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try fixture.store.artifactURL(
+            meetingID: meeting.id, relativePath: "work/\(waiting.processingRunID!)/prepared.json").path))
+        XCTAssertTrue(try fixture.calls().isEmpty)
+        try await waitFor({ attempts >= 3 && !processor.isBusy && processor.queuedCount == 0 }, timeout: 5)
+        XCTAssertEqual(try fixture.calls().count, 1)
+        XCTAssertEqual(delays, [1, 2])
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "failed")
+    }
+
+    @MainActor
+    func testDefaultRemotePreflightUsesBundledClientHealthCommand() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Health command", wait: false)
+        let client = fixture.directory.appendingPathComponent("afterword_worker/__main__.py")
+        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true }, remoteClientURL: client)
+        processor.start(meeting)
+        try await waitFor { !processor.isBusy && processor.queuedCount == 0 }
+        XCTAssertEqual(try fixture.calls().count, 1)
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "failed")
+    }
+
+    @MainActor
+    func testRemoteRetrySurvivesRelaunchAndKeepsSavedDestination() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Restore remote")
+        let client = fixture.directory.appendingPathComponent("afterword_worker/__main__.py")
+        let first = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true }, remoteAvailability: { .unavailable }, retryDelay: { _ in 30 },
+            remoteClientURL: client)
+        first.start(meeting)
+        try await waitFor { !first.isBusy && first.queuedCount == 1 }
+        first.beginShutdown()
+        let stored = try fixture.store.load(id: meeting.id)
+        let restored = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { false }, remoteAvailability: { .unavailable }, retryDelay: { _ in 30 },
+            remoteClientURL: client)
+        restored.restoreQueue(from: [stored])
+        try await waitFor { !restored.isBusy && restored.queuedCount == 1 }
+        let pending = try fixture.store.load(id: meeting.id)
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: pending)?.remote, true)
+        XCTAssertTrue(try fixture.calls().isEmpty)
+        restored.cancelQueued(meetingID: meeting.id)
+        XCTAssertEqual(restored.queuedCount, 0)
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "cancelled")
+    }
+
+    @MainActor
+    func testUnconfirmedRemoteCleanupFailsQueuedRemoteRequestsButKeepsLocalChoice() async throws {
+        let previous = UserDefaults.standard.object(forKey: RemoteProcessing.preferenceKey)
+        UserDefaults.standard.set(true, forKey: RemoteProcessing.preferenceKey)
+        defer {
+            if let previous { UserDefaults.standard.set(previous, forKey: RemoteProcessing.preferenceKey) }
+            else { UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey) }
+        }
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let first = try fixture.meeting("Unconfirmed cleanup")
+        let second = try fixture.meeting("Waiting remote")
+        let configURL = try fixture.store.artifactURL(meetingID: first.id, relativePath: "fixture.json")
+        var config = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as! [String: Any]
+        config["cleanup_fail"] = true
+        try JSONSerialization.data(withJSONObject: config).write(to: configURL)
+        let client = fixture.directory.appendingPathComponent("afterword_worker/__main__.py")
+        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true }, remoteAvailability: { .ready }, remoteClientURL: client)
+        processor.start(first)
+        processor.start(second)
+        try await waitFor { !processor.isBusy && processor.queuedCount == 0 }
+        XCTAssertEqual(try fixture.store.load(id: first.id).processingStatus, "failed")
+        XCTAssertEqual(try fixture.store.load(id: second.id).processingStatus, "failed")
+        XCTAssertEqual(try fixture.calls().count, 1)
+        XCTAssertFalse(RemoteProcessing.enabled)
+        let restored = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true }, remoteAvailability: { .ready }, remoteClientURL: client)
+        restored.restoreQueue(from: try fixture.store.list())
+        XCTAssertEqual(restored.queuedCount, 0)
+    }
+
+    @MainActor
+    func testRemotePauseDoesNotPersistQueuedIntentUntilCleanupFinishes() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Pause remote")
+        let client = fixture.directory.appendingPathComponent("afterword_worker/__main__.py")
+        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true }, remoteAvailability: { .ready }, remoteClientURL: client)
+        processor.start(meeting)
+        try await waitFor { try fixture.calls("waiting").count == 1 }
+        processor.pause()
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "processing")
+        try await waitFor { !processor.isBusy }
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "paused")
+    }
+
+    @MainActor
+    func testInterruptedRemoteJobNeedsManualReviewInsteadOfRestoringUpload() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Interrupted remote")
+        let original = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { true })
+        original.pause()
+        original.start(meeting)
+        var interrupted = try fixture.store.load(id: meeting.id)
+        interrupted.processingStatus = "interrupted"
+        try fixture.store.save(interrupted)
+        let restored = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+            remoteEnabled: { false }, remoteAvailability: { .ready })
+        restored.restoreQueue(from: [interrupted])
+        XCTAssertEqual(restored.queuedCount, 0)
+        XCTAssertFalse(restored.isBusy)
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "failed")
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
+    @MainActor
     func testRecordingWaitsForChildExitAndNewRecordingRunsBeforeDeferredWork() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let old = try fixture.meeting("Old")
         let new = try fixture.meeting("New", wait: false)
-        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let processor = local(fixture)
         processor.start(old)
         try await waitFor { try fixture.calls("waiting").count == 1 }
         let child = try fixture.child(old)
@@ -187,7 +359,7 @@ final class ProcessingQueueTests: XCTestCase {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let meeting = try fixture.meeting("Paused", publish: "preview")
-        let first = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let first = local(fixture)
         first.start(meeting)
         try await waitFor { try fixture.calls("waiting").count == 1 }
         first.pause()
@@ -199,7 +371,7 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertTrue(try first.loadTranscript(stored).speakerLabelsPending)
         stored = try ArtifactRecovery.recover(stored, store: fixture.store)
         XCTAssertEqual(stored.processingStatus, "paused")
-        let restarted = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let restarted = local(fixture)
         restarted.restoreQueue(from: [stored])
         XCTAssertTrue(restarted.isPaused)
         XCTAssertFalse(restarted.isBusy)
@@ -212,7 +384,7 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertEqual(restarted.queuedCount, 0)
         XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "cancelled")
         let cancelled = try ArtifactRecovery.recover(fixture.store.load(id: meeting.id), store: fixture.store)
-        let third = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let third = local(fixture)
         third.restoreQueue(from: [cancelled])
         XCTAssertFalse(third.isBusy)
         XCTAssertEqual(third.queuedCount, 0)
@@ -224,7 +396,7 @@ final class ProcessingQueueTests: XCTestCase {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let meeting = try fixture.meeting(publish, publish: publish)
-            let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+            let processor = local(fixture)
             processor.start(meeting)
             try await waitFor { try fixture.calls("waiting").count == 1 }
             let reserved = await processor.reserveRecording()
@@ -255,7 +427,7 @@ final class ProcessingQueueTests: XCTestCase {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let meeting = try fixture.meeting(mutation, wait: false)
-            let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+            let processor = local(fixture)
             processor.pause()
             processor.start(meeting)
             var changed = try fixture.store.load(id: meeting.id)
@@ -283,7 +455,7 @@ final class ProcessingQueueTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let first = try fixture.meeting("First")
         let second = try fixture.meeting("Second", wait: false)
-        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let processor = local(fixture)
         processor.start(first)
         try await waitFor { try fixture.calls("waiting").count == 1 }
         processor.start(second)
@@ -294,7 +466,7 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertEqual(processor.queuedCount, 2)
         XCTAssertEqual(try fixture.store.load(id: first.id).processingStatus, "queued")
         try fixture.configure(first, wait: false)
-        let restored = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let restored = local(fixture)
         let meetings = try fixture.store.list().map { try ArtifactRecovery.recover($0, store: fixture.store) }
         restored.restoreQueue(from: meetings)
         try await waitFor { !restored.isBusy && restored.queuedCount == 0 }
@@ -303,6 +475,12 @@ final class ProcessingQueueTests: XCTestCase {
 
     @MainActor
     func testMicrophonePermissionFailureReleasesReservationAndRestartsDeferredJob() async throws {
+        let previous = UserDefaults.standard.object(forKey: RemoteProcessing.preferenceKey)
+        UserDefaults.standard.set(false, forKey: RemoteProcessing.preferenceKey)
+        defer {
+            if let previous { UserDefaults.standard.set(previous, forKey: RemoteProcessing.preferenceKey) }
+            else { UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey) }
+        }
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let meeting = try fixture.meeting("Permission")
@@ -332,7 +510,7 @@ final class ProcessingQueueTests: XCTestCase {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let meeting = try fixture.meeting("Cleanup", leak: true)
-        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let processor = local(fixture)
         processor.start(meeting)
         try await waitFor { try fixture.calls("waiting").count == 1 }
         let child = try fixture.child(meeting)
@@ -360,7 +538,7 @@ final class ProcessingQueueTests: XCTestCase {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let meeting = try fixture.meeting(publish, publish: publish)
-            let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+            let processor = local(fixture)
             processor.start(meeting)
             try await waitFor { try fixture.calls("waiting").count == 1 }
             XCTAssertNil(try fixture.store.load(id: meeting.id).activeRevisionID)
@@ -392,7 +570,7 @@ final class ProcessingQueueTests: XCTestCase {
         var config = try JSONSerialization.jsonObject(with: Data(contentsOf: configURL)) as! [String: Any]
         config["progress"] = true
         try JSONSerialization.data(withJSONObject: config).write(to: configURL)
-        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let processor = local(fixture)
         processor.start(meeting)
         try await waitFor { processor.completedUnits == 0 && processor.stageElapsedSeconds > 0 }
         let elapsedBeforeLifecycle = processor.stageElapsedSeconds
@@ -416,7 +594,7 @@ final class ProcessingQueueTests: XCTestCase {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.directory) }
             let meeting = try fixture.meeting("Missing request")
-            let original = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+            let original = local(fixture)
             original.pause()
             original.start(meeting)
             var queued = try fixture.store.load(id: meeting.id)
@@ -427,7 +605,7 @@ final class ProcessingQueueTests: XCTestCase {
                 let request = try fixture.store.artifactURL(meetingID: meeting.id, relativePath: "work/\(queued.processingRunID!)/request.json")
                 try FileManager.default.removeItem(at: request)
             }
-            let restored = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+            let restored = local(fixture)
             restored.restoreQueue(from: [queued])
             XCTAssertFalse(restored.isMeetingBusy(meeting.id))
             XCTAssertEqual(restored.queuedCount, 0)
@@ -443,7 +621,7 @@ final class ProcessingQueueTests: XCTestCase {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let meeting = try fixture.meeting("Cancel blocked cleanup", leak: true)
-        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime)
+        let processor = local(fixture)
         processor.start(meeting)
         try await waitFor { try fixture.calls("waiting").count == 1 }
         let child = try fixture.child(meeting)

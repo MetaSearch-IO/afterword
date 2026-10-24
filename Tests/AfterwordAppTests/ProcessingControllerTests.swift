@@ -60,11 +60,32 @@ final class ProcessingControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testRemoteIsDefaultUnlessThisMacWasExplicitlySelected() {
+        let previous = UserDefaults.standard.object(forKey: RemoteProcessing.preferenceKey)
+        defer {
+            if let previous { UserDefaults.standard.set(previous, forKey: RemoteProcessing.preferenceKey) }
+            else { UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey) }
+        }
+        UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey)
+        XCTAssertTrue(RemoteProcessing.enabled)
+        UserDefaults.standard.set(false, forKey: RemoteProcessing.preferenceKey)
+        XCTAssertFalse(RemoteProcessing.enabled)
+    }
+
+    @MainActor
     func testUnconfirmedRemoteCleanupDisablesFutureRemoteProcessing() async throws {
         UserDefaults.standard.set(true, forKey: RemoteProcessing.preferenceKey)
         defer { UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey) }
         try await runFixture(terminal: "cleanup-failure", remote: true)
         XCTAssertFalse(UserDefaults.standard.bool(forKey: RemoteProcessing.preferenceKey))
+    }
+
+    @MainActor
+    func testUncertainRemoteSubmissionDisablesFurtherRemoteProcessing() async throws {
+        UserDefaults.standard.set(true, forKey: RemoteProcessing.preferenceKey)
+        defer { UserDefaults.standard.removeObject(forKey: RemoteProcessing.preferenceKey) }
+        try await runFixture(terminal: "submission-unknown", remote: true)
+        XCTAssertFalse(RemoteProcessing.enabled)
     }
 
     @MainActor
@@ -202,6 +223,9 @@ final class ProcessingControllerTests: XCTestCase {
         if '\(terminal)' == 'cleanup-failure':
             event('failed',stage='summary',code='remote_cleanup',message='Delete failed')
             sys.exit(1)
+        if '\(terminal)' == 'submission-unknown':
+            event('failed',stage='summary',code='remote_submission_unknown',message='Upload response lost')
+            sys.exit(1)
         if '\(terminal)' == 'missing-summary':
             event('completed',revision_id=revision,transcript_path=f'revisions/{revision}/transcript.json',summary_id=None,summary_path=None)
         sys.exit(0)
@@ -221,7 +245,8 @@ final class ProcessingControllerTests: XCTestCase {
         }
         try JSONSerialization.data(withJSONObject: runtime).write(to: runtimeURL)
         let processor = ProcessingController(store: store, runtimeURL: runtimeURL,
-                                             remoteEnabled: { remote }, remoteClientURL: remoteClientURL)
+                                             remoteEnabled: { remote }, remoteAvailability: { .ready },
+                                             remoteClientURL: remoteClientURL)
         var didRename = false
         var renameError: Error?
         processor.changed = { [weak processor] in

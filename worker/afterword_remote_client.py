@@ -20,8 +20,8 @@ What it does:
      terminal event it pulls the files the worker has written so far into the local
      meeting, so whatever the event points at already exists locally;
   4. confirms deletion on hyperion before reporting a terminal result.
-If hyperion is unreachable it fails like the worker does (a `failed` event, code
-"remote"), so the caller can fall back to local processing.
+If hyperion is unreachable before upload, it reports `remote_preflight` so the
+caller can retry safely. An uncertain submission reports `remote_submission_unknown`.
 """
 from __future__ import annotations
 
@@ -118,6 +118,18 @@ class RemoteError(Exception):
     def __init__(self, status: int, message: str):
         super().__init__(f"{status}: {message}")
         self.status = status
+
+
+class PreflightUnavailable(Exception):
+    pass
+
+
+class IncompatibleWorker(Exception):
+    pass
+
+
+class SubmissionUnknown(Exception):
+    pass
 
 
 class UploadCancelled(Exception):
@@ -356,10 +368,17 @@ class Run:
                 raise ArtifactRejected(str(error)) from error
 
     def preflight(self):
-        health = json.loads(self.remote.call("GET", "/v1/health", timeout=6))
+        try:
+            health = json.loads(self.remote.call("GET", "/v1/health", timeout=20))
+        except RemoteError as error:
+            if error.status < 500:
+                raise IncompatibleWorker("Hyperion has not confirmed a compatible Afterword worker.") from error
+            raise PreflightUnavailable(str(error)) from error
+        except (OSError, http.client.HTTPException, ValueError) as error:
+            raise PreflightUnavailable(str(error)) from error
         if not isinstance(health, dict) or health.get("ok") is not True \
                 or health.get("worker_protocol") != WORKER_PROTOCOL:
-            raise ValueError("Hyperion has not confirmed a compatible Afterword worker. Retry locally.")
+            raise IncompatibleWorker("Hyperion has not confirmed a compatible Afterword worker.")
 
     def submit(self):
         if self.cancelled.is_set():
@@ -374,9 +393,13 @@ class Run:
             if self.cancelled.is_set():
                 raise UploadCancelled()
             query = urllib.parse.urlencode({"args": json.dumps(self.worker_args())})
-            data = self.remote.call("POST", f"/v1/jobs?{query}", body=CancellableBody(body, self.cancelled), timeout=600,
-                                    headers={"Content-Type": "application/x-tar", "Content-Length": str(size)})
-        self.job = json.loads(data)["job"]
+            try:
+                data = self.remote.call("POST", f"/v1/jobs?{query}", body=CancellableBody(body, self.cancelled), timeout=600,
+                                        headers={"Content-Type": "application/x-tar", "Content-Length": str(size)})
+                self.job = json.loads(data)["job"]
+            except (OSError, http.client.HTTPException, RemoteError, ValueError, TypeError, KeyError,
+                    UploadCancelled) as error:
+                raise SubmissionUnknown("Hyperion may have accepted the upload; do not submit this meeting again until its job state is checked.") from error
         if self.cancelled.is_set():
             self.cancel()
 
@@ -426,6 +449,15 @@ class Run:
         threading.Thread(target=self.watch_stdin, daemon=True).start()
         try:
             self.submit()
+        except SubmissionUnknown as error:
+            self.emit_failed(str(error), "remote_submission_unknown")
+            return 1
+        except PreflightUnavailable as error:
+            self.emit_failed(f"Hyperion is unavailable ({error}).", "remote_preflight")
+            return 1
+        except IncompatibleWorker as error:
+            self.emit_failed(str(error), "remote_incompatible")
+            return 1
         except UploadCancelled:
             self.emit_cancelled()
             return 2
@@ -469,6 +501,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--server", default=os.environ.get("AFTERWORD_REMOTE"),
                    help="http://host:port of hyperion's afterword-remote (default: $AFTERWORD_REMOTE)")
     sub = p.add_subparsers(dest="command", required=True)
+    health = sub.add_parser("health")
+    health.add_argument("--run-id", required=True)
     process = sub.add_parser("process")
     for argument in ("meeting", "runtime", "run-id", "revision-id", "summary-id"):
         process.add_argument("--" + argument, required=True)
@@ -483,8 +517,48 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+def health_check(args) -> int:
+    run = Run(argparse.Namespace(meeting=".", run_id=args.run_id), None)
+    try:
+        run.remote = Remote(args.server or "")
+    except ValueError as error:
+        run.emit_failed(str(error), "setup")
+        return 1
+    run.emit_event({"protocol_version": 1, "run_id": args.run_id, "type": "started"})
+    done = threading.Event()
+    outcome = []
+    def check():
+        try:
+            run.preflight()
+            outcome.append(("completed", None))
+        except (PreflightUnavailable, IncompatibleWorker) as error:
+            outcome.append(("failed", error))
+        except Exception as error:
+            outcome.append(("failed", error))
+        finally:
+            done.set()
+    threading.Thread(target=run.watch_stdin, daemon=True).start()
+    threading.Thread(target=check, daemon=True).start()
+    while not done.wait(0.1):
+        if run.cancelled.is_set():
+            run.emit_cancelled()
+            return 2
+    if run.cancelled.is_set():
+        run.emit_cancelled()
+        return 2
+    kind, error = outcome[0]
+    if kind == "completed":
+        run.terminal = True
+        run.emit_event({"protocol_version": 1, "run_id": args.run_id, "type": "completed"})
+        return 0
+    run.emit_failed(str(error), "remote_preflight" if isinstance(error, PreflightUnavailable) else "remote_incompatible")
+    return 1
+
+
 def main(argv=None) -> int:
     args = parser().parse_args(argv)
+    if args.command == "health":
+        return health_check(args)
     run = Run(args, None)
     root = Path(args.meeting)
     for key in ("prepared", "names", "summary_checkpoint"):

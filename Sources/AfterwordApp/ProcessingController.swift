@@ -42,6 +42,11 @@ enum RemoteProcessing {
     static let preferenceKey = "remoteProcessingEnabled"
     static let endpoint = "http://100.92.212.58:8790"
     static var clientURL: URL { Bundle.main.resourceURL!.appendingPathComponent("afterword_remote_client.py") }
+
+    enum Availability { case ready, unavailable, incompatible }
+
+    static var enabled: Bool { UserDefaults.standard.object(forKey: preferenceKey) as? Bool ?? true }
+
 }
 
 struct ProcessingRequest: Codable {
@@ -109,6 +114,7 @@ struct ProcessingRequest: Codable {
 final class ProcessingController: ObservableObject {
     private typealias Request = ProcessingRequest
     private enum CancellationReason { case user, recording, pause, quit }
+    private struct RemoteUnavailable: Error {}
     @Published private(set) var isBusy = false
     @Published private(set) var isCancelling = false
     @Published private(set) var queuedCount = 0
@@ -127,6 +133,8 @@ final class ProcessingController: ObservableObject {
     private let store: MeetingStore
     private let runtimeURL: URL
     private let remoteEnabled: () -> Bool
+    private let remoteAvailability: (() async -> RemoteProcessing.Availability)?
+    private let retryDelay: (Int) -> TimeInterval
     private let remoteClientURL: URL
     private var task: Task<Void, Never>?
     private var preparation: Task<String, Error>?
@@ -138,6 +146,8 @@ final class ProcessingController: ObservableObject {
     private var validationError: String?
     private var cleanupProbe: WorkerProcess?
     private var queue: [Request] = []
+    private var remoteRetryTask: Task<Void, Never>?
+    private var remoteRetryAttempt = 0
     private var activeRequest: Request?
     private var cancellationReason: CancellationReason?
     private var recordingReserved = false
@@ -172,11 +182,17 @@ final class ProcessingController: ObservableObject {
     }
 
     init(store: MeetingStore, runtimeURL: URL = RuntimeConfiguration.url,
-         remoteEnabled: @escaping () -> Bool = { UserDefaults.standard.bool(forKey: RemoteProcessing.preferenceKey) },
+         remoteEnabled: @escaping () -> Bool = { RemoteProcessing.enabled },
+         remoteAvailability: (() async -> RemoteProcessing.Availability)? = nil,
+         retryDelay: @escaping (Int) -> TimeInterval = { attempt in
+             min(60, pow(2, Double(attempt)) * Double.random(in: 0.9...1.1))
+         },
          remoteClientURL: URL = RemoteProcessing.clientURL) {
         self.store = store
         self.runtimeURL = runtimeURL
         self.remoteEnabled = remoteEnabled
+        self.remoteAvailability = remoteAvailability
+        self.retryDelay = retryDelay
         self.remoteClientURL = remoteClientURL
     }
 
@@ -197,7 +213,7 @@ final class ProcessingController: ObservableObject {
         } catch { message = error.localizedDescription }
     }
 
-    private func makeRequest(_ meeting: Meeting, summaryOnly: Bool) throws -> Request {
+    private func makeRequest(_ meeting: Meeting, summaryOnly: Bool, remote: Bool? = nil) throws -> Request {
         try Artifacts.require(!meeting.captureState.isActive, "Finish recording before processing.")
         try Artifacts.require(meeting.audioRemovalStartedAt == nil && (summaryOnly || meeting.audioRemovedAt == nil),
                               "Saved audio has been removed from this meeting.")
@@ -209,7 +225,7 @@ final class ProcessingController: ObservableObject {
                               baseRevision: meeting.activeRevisionID, baseSummary: meeting.activeSummaryID,
                               audioFingerprint: Artifacts.audioFingerprint(meeting.chunks),
                               language: meeting.asrLanguage ?? "auto", nameMapRevision: try Artifacts.nameMapRevision(names),
-                              remote: remoteEnabled())
+                              remote: remote ?? remoteEnabled())
         let directory = try store.artifactURL(meetingID: meeting.id, relativePath: "work/\(request.run)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(request).write(to: directory.appendingPathComponent("request.json"), options: .atomic)
@@ -238,7 +254,9 @@ final class ProcessingController: ObservableObject {
     private func drainQueue() {
         guard task == nil, !isBusy, !recordingReserved, !isPaused, !shuttingDown, !blocked else { return }
         while !queue.isEmpty {
-            let request = queue.removeFirst()
+            let index = remoteRetryTask == nil ? 0 : queue.firstIndex { $0.remote != true }
+            guard let index else { return }
+            let request = queue.remove(at: index)
             queuedCount = queue.count
             do {
                 _ = try currentMeeting(request)
@@ -301,7 +319,15 @@ final class ProcessingController: ObservableObject {
                 if remote {
                     try Artifacts.require(FileManager.default.fileExists(atPath: remoteClientURL.path),
                                           "Remote processing client is missing from this app build.")
+                    let availability = if let remoteAvailability { await remoteAvailability() }
+                        else { try await checkRemoteAvailability(python: runtime.python, run: run) }
+                    switch availability {
+                    case .ready: break
+                    case .unavailable: throw RemoteUnavailable()
+                    case .incompatible: throw CaptureFailure(message: "Hyperion has not confirmed a compatible Afterword worker.")
+                    }
                 }
+                guard !cancelled else { throw CancellationError() }
                 meeting.processingStatus = "processing"
                 meeting.processingStage = "preparing"
                 meeting.processingError = nil
@@ -341,16 +367,24 @@ final class ProcessingController: ObservableObject {
                 guard result.cleanupConfirmed else {
                     blocked = true
                     cleanupProbe = worker
+                    if remote { stopRemoteProcessing() }
                     throw CaptureFailure(message: "Worker cleanup could not be confirmed. Recording remains blocked until owned processes have exited.")
                 }
-                if let error = result.error { throw CaptureFailure(message: error) }
+                if let error = result.error {
+                    if remote { stopRemoteProcessing() }
+                    throw CaptureFailure(message: error)
+                }
                 if let validationError { throw CaptureFailure(message: validationError) }
                 if remote && (result.terminal?.code == "remote_cleanup"
+                              || result.terminal?.code == "remote_submission_unknown"
                               || (cancelled && !(result.exitStatus == 2 && result.terminal?.type == "cancelled"))) {
-                    remoteCleanupUnconfirmed = true
-                    UserDefaults.standard.set(false, forKey: RemoteProcessing.preferenceKey)
-                    throw CaptureFailure(message: "Remote job cleanup was not confirmed. Remote processing has been turned off; ask the Hyperion administrator to check the job before retrying remotely.")
+                    stopRemoteProcessing()
+                    throw CaptureFailure(message: "Remote job state or cleanup was not confirmed. Remote processing has been turned off; ask the Hyperion administrator to check the job before retrying remotely.")
                 }
+                if remote && result.terminal?.code == "remote_preflight" && !cancelled {
+                    throw RemoteUnavailable()
+                }
+                if remote { remoteRetryAttempt = 0 }
                 if cancelled || result.terminal?.type == "cancelled" { throw CancellationError() }
                 guard result.exitStatus == 0, let terminal = result.terminal, terminal.type == "completed" else {
                     let failure = result.terminal?.message ?? "Worker exited without a valid completion (exit \(result.exitStatus))."
@@ -380,6 +414,20 @@ final class ProcessingController: ObservableObject {
             } catch {
                 preparation = nil
                 worker = nil
+                if error is RemoteUnavailable && !cancelled && !shuttingDown {
+                    if var meeting = try? store.load(id: request.meetingID), meeting.processingRunID == run {
+                        meeting.processingStatus = "queued"
+                        meeting.processingStage = nil
+                        meeting.processingError = "Waiting for Hyperion to become available."
+                        try? store.save(meeting)
+                        queue.insert(request, at: 0)
+                        queuedCount = queue.count
+                        scheduleRemoteRetry()
+                        message = meeting.processingError
+                    }
+                    finishActivity()
+                    return
+                }
                 let wasCancelled = !blocked && !remoteCleanupUnconfirmed && (cancelled || error is CancellationError)
                 message = wasCancelled ? "Processing cancelled. Saved audio and accepted artifacts remain available." : error.localizedDescription
                 if var meeting = try? store.load(id: request.meetingID), meeting.processingRunID == run {
@@ -388,7 +436,7 @@ final class ProcessingController: ObservableObject {
                             ? "Processing cancelled. Your transcript is saved; finish speaker labels later."
                             : "Your transcript is saved. Speaker labeling did not finish. \(error.localizedDescription)"
                     }
-                    let deferred = cancellationReason != nil && cancellationReason != .user
+                    let deferred = cancellationReason != nil && cancellationReason != .user && !remoteCleanupUnconfirmed
                     meeting.processingStatus = deferred ? (isPaused ? "paused" : "queued")
                         : (wasCancelled ? "cancelled" : (meeting.chunks.isEmpty ? "empty" : "failed"))
                     meeting.processingStage = nil
@@ -404,6 +452,59 @@ final class ProcessingController: ObservableObject {
         }
     }
 
+    private func scheduleRemoteRetry() {
+        remoteRetryTask?.cancel()
+        remoteRetryAttempt += 1
+        let delay = retryDelay(remoteRetryAttempt)
+        remoteRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.remoteRetryTask = nil
+            self.drainQueue()
+        }
+    }
+
+    private func checkRemoteAvailability(python: String, run: String) async throws -> RemoteProcessing.Availability {
+        let probe = WorkerProcess(runID: run)
+        worker = probe
+        let result = try await probe.run(executable: URL(fileURLWithPath: python),
+            arguments: ["-B", remoteClientURL.path, "health", "--run-id", run],
+            directory: remoteClientURL.deletingLastPathComponent(),
+            environment: ["AFTERWORD_REMOTE": RemoteProcessing.endpoint, "PYTHONDONTWRITEBYTECODE": "1"]) { _ in }
+        worker = nil
+        guard result.cleanupConfirmed else {
+            blocked = true
+            cleanupProbe = probe
+            throw CaptureFailure(message: "Remote preflight process cleanup could not be confirmed.")
+        }
+        if let error = result.error { throw CaptureFailure(message: error) }
+        if cancelled || result.terminal?.type == "cancelled" { throw CancellationError() }
+        if result.exitStatus == 0 && result.terminal?.type == "completed" { return .ready }
+        switch result.terminal?.code {
+        case "remote_preflight": return .unavailable
+        case "remote_incompatible": return .incompatible
+        default: throw CaptureFailure(message: result.terminal?.message ?? "Remote preflight exited without a result.")
+        }
+    }
+
+    private func failQueuedRemoteRequests() {
+        let stopped = queue.filter { $0.remote == true }
+        queue.removeAll { $0.remote == true }
+        for request in stopped {
+            reject(request, message: "Remote job state or cleanup was not confirmed. Ask the Hyperion administrator to check before retrying remotely.")
+        }
+        queuedCount = queue.count
+        remoteRetryTask?.cancel()
+        remoteRetryTask = nil
+        remoteRetryAttempt = 0
+    }
+
+    private func stopRemoteProcessing() {
+        remoteCleanupUnconfirmed = true
+        UserDefaults.standard.set(false, forKey: RemoteProcessing.preferenceKey)
+        failQueuedRemoteRequests()
+    }
+
     private func requestCancellation(_ reason: CancellationReason) {
         guard isBusy else { return }
         if cancellationReason == .user { return }
@@ -411,12 +512,15 @@ final class ProcessingController: ObservableObject {
         if reason == .user { deferredAfterCleanup = nil }
         if let request = activeRequest,
            var meeting = try? store.load(id: request.meetingID), meeting.processingRunID == request.run {
-            meeting.processingStatus = reason == .user ? "cancelled" : (isPaused ? "paused" : "queued")
-            try? store.save(meeting)
+            if reason == .user || !processingRemotely {
+                meeting.processingStatus = reason == .user ? "cancelled" : (isPaused ? "paused" : "queued")
+                try? store.save(meeting)
+            }
         }
         guard !isCancelling else { return }
         cancelled = true
         isCancelling = true
+        if stage == "preflight" { task?.cancel() }
         setStage("cancelling")
         preparation?.cancel()
         worker?.cancel()
@@ -436,6 +540,11 @@ final class ProcessingController: ObservableObject {
             try? store.save(meeting)
         }
         queuedCount = queue.count
+        if !queue.contains(where: { $0.remote == true }) {
+            remoteRetryTask?.cancel()
+            remoteRetryTask = nil
+            remoteRetryAttempt = 0
+        }
         changed?()
     }
 
@@ -458,6 +567,8 @@ final class ProcessingController: ObservableObject {
     func pause() {
         guard !isPaused, !shuttingDown else { return }
         isPaused = true
+        remoteRetryTask?.cancel()
+        remoteRetryTask = nil
         updateQueuedStatus()
         requestCancellation(.pause)
         changed?()
@@ -485,7 +596,7 @@ final class ProcessingController: ObservableObject {
             let meeting = try ArtifactRecovery.recover(beforeRecovery, store: store)
             if meeting.processingRunID != request.run { return }
             let summaryOnly = try resumesSummaryOnly(request, meeting: meeting)
-            let continuation = try makeRequest(meeting, summaryOnly: summaryOnly)
+            let continuation = try makeRequest(meeting, summaryOnly: summaryOnly, remote: request.remote ?? false)
             queue.insert(continuation, at: 0)
             queuedCount = queue.count
             message = isPaused ? "Processing paused. Saved transcripts remain available." : "Processing queued while recording takes priority."
@@ -511,9 +622,11 @@ final class ProcessingController: ObservableObject {
             do {
                 // Older jobs have no queue snapshot and retain the existing manual retry path.
                 guard let request = try Request.load(store: store, meeting: candidate) else { continue }
+                try Artifacts.require(candidate.processingStatus != "interrupted" || request.remote != true,
+                                      "A previous remote job ended before its state and cleanup were confirmed. Ask the Hyperion administrator to check before retrying remotely.")
                 let current = try currentMeeting(request, allowPublished: true)
                 let summaryOnly = try resumesSummaryOnly(request, meeting: current)
-                queue.append(try makeRequest(current, summaryOnly: summaryOnly))
+                queue.append(try makeRequest(current, summaryOnly: summaryOnly, remote: request.remote ?? false))
             } catch {
                 message = error.localizedDescription
                 if var current = try? store.load(id: candidate.id), current.processingRunID == run {
@@ -530,7 +643,11 @@ final class ProcessingController: ObservableObject {
         changed?()
     }
 
-    func beginShutdown() { shuttingDown = true }
+    func beginShutdown() {
+        shuttingDown = true
+        remoteRetryTask?.cancel()
+        remoteRetryTask = nil
+    }
 
     func prepareToQuit() async -> Bool {
         beginShutdown()

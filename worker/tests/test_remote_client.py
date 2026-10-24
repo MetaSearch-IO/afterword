@@ -7,11 +7,13 @@ from types import SimpleNamespace
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
-from afterword_remote_client import (CancellableBody, Remote, Run, UploadCancelled, WORKER_PROTOCOL,
-                                     apply_changes, localize_profiles, meeting_archive)
+from afterword_remote_client import (CancellableBody, IncompatibleWorker, PreflightUnavailable, Remote, Run,
+                                     SubmissionUnknown, UploadCancelled, WORKER_PROTOCOL,
+                                     apply_changes, localize_profiles, main, meeting_archive)
 
 
 class RemoteClientTests(unittest.TestCase):
@@ -72,9 +74,71 @@ class RemoteClientTests(unittest.TestCase):
             remote = SimpleNamespace(call=call)
             args = SimpleNamespace(meeting=folder, run_id="run")
             run = Run(args, remote)
-            with self.assertRaisesRegex(ValueError, "compatible"):
+            with self.assertRaisesRegex(IncompatibleWorker, "compatible"):
                 run.submit()
             self.assertEqual(calls, ["GET"])
+
+    def test_unavailable_preflight_never_uploads_and_uncertain_post_is_not_retryable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.fixture(root)
+            args = SimpleNamespace(meeting=str(root), run_id="run", revision_id="next", summary_id="notes",
+                language="auto", summary_only=False, transcript_first=True, progress_events=True,
+                allow_unknown_speakers=False, prepared="work/run/prepared.json",
+                names="work/run/names.json", summary_checkpoint=None)
+            calls = []
+            def unavailable(method, *unused, **ignored):
+                calls.append(method)
+                raise OSError("offline")
+            with self.assertRaises(PreflightUnavailable):
+                Run(args, SimpleNamespace(call=unavailable)).submit()
+            self.assertEqual(calls, ["GET"])
+
+            def uncertain(method, *unused, **ignored):
+                calls.append(method)
+                if method == "GET": return json.dumps({"ok": True, "worker_protocol": WORKER_PROTOCOL}).encode()
+                raise OSError("connection lost after upload")
+            with self.assertRaises(SubmissionUnknown):
+                Run(args, SimpleNamespace(call=uncertain)).submit()
+            self.assertEqual(calls, ["GET", "GET", "POST"])
+
+    def test_health_command_uses_same_preflight_without_meeting_data_and_cancels(self):
+        for response, expected in [(json.dumps({"ok": True, "worker_protocol": WORKER_PROTOCOL}).encode(),
+                                    (0, "completed")), (OSError("offline"), (1, "remote_preflight"))]:
+            output = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+            read_fd, write_fd = os.pipe()
+            try:
+                with os.fdopen(read_fd) as control, patch("sys.stdin", control), patch("sys.stdout", output), \
+                     patch.object(Remote, "call", side_effect=response if isinstance(response, Exception) else None,
+                                  return_value=response if isinstance(response, bytes) else None) as call:
+                    code = main(["--server", "http://127.0.0.1:1", "health", "--run-id", "run"])
+                events = [json.loads(line) for line in output.buffer.getvalue().splitlines()]
+                self.assertEqual((code, events[-1].get("code", events[-1]["type"])), expected)
+                self.assertEqual(call.call_count, 1)
+                self.assertEqual(call.call_args.args[:2], ("GET", "/v1/health"))
+            finally:
+                os.close(write_fd)
+
+        waiting = threading.Event()
+        def slow(*unused, **ignored):
+            waiting.wait(1)
+            raise OSError("offline")
+        output = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        read_fd, write_fd = os.pipe()
+        try:
+            with os.fdopen(read_fd) as control, patch("sys.stdin", control), patch("sys.stdout", output), \
+                 patch.object(Remote, "call", side_effect=slow):
+                timer = threading.Timer(0.05, lambda: os.write(write_fd, b'{"protocol_version":1,"run_id":"run","type":"cancel"}\n'))
+                timer.start()
+                began = time.monotonic()
+                code = main(["--server", "http://127.0.0.1:1", "health", "--run-id", "run"])
+                timer.join()
+                self.assertLess(time.monotonic() - began, 0.5)
+            events = [json.loads(line) for line in output.buffer.getvalue().splitlines()]
+            self.assertEqual((code, events[-1]["type"]), (2, "cancelled"))
+        finally:
+            waiting.set()
+            os.close(write_fd)
 
     def test_cancel_before_submit_or_during_upload_does_not_send_more_audio(self):
         with tempfile.TemporaryDirectory() as folder:

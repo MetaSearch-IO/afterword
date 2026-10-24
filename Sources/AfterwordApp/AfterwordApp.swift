@@ -26,15 +26,15 @@ struct AfterwordApp: App {
 }
 
 private struct RemoteProcessingSettings: View {
-    @AppStorage(RemoteProcessing.preferenceKey) private var enabled = false
+    @AppStorage(RemoteProcessing.preferenceKey) private var enabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Toggle("Process meetings on Hyperion", isOn: $enabled)
-            Text("Off by default. When enabled, prepared audio and the inputs needed for processing are sent to Hyperion over your tailnet. Raw capture chunks stay on this Mac.")
-            Text("An updated Hyperion service is required. If it is not ready, no meeting data is uploaded and processing fails.")
+            Text("On by default. Prepared audio and processing inputs are sent to Hyperion over your tailnet. Raw capture chunks stay on this Mac. Turn this off to process new meetings on this Mac.")
+            Text("If Hyperion is unavailable, processing stays queued and retries with increasing delays. No meeting data is uploaded until its compatible worker responds.")
             Text("The choice is saved when a meeting is queued. Changing it affects new processing requests, not a queued or running job.")
-            Text("If Hyperion is unavailable, turn this off and retry locally. Voice IDs are matched against earlier meetings on this Mac when the embedding model agrees.")
+            Text("If a remote job's state or cleanup cannot be confirmed, remote processing stops until the Hyperion administrator checks it. Voice IDs are matched against earlier meetings on this Mac when the embedding model agrees.")
         }
         .font(.callout)
         .padding(24)
@@ -373,6 +373,7 @@ struct MeetingWindow: View {
 struct NewRecordingSetupView: View {
     @ObservedObject var controller: MeetingController
     @ObservedObject var calendar: CalendarController
+    @AppStorage(RemoteProcessing.preferenceKey) private var remoteEnabled = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -384,6 +385,11 @@ struct NewRecordingSetupView: View {
             CalendarRecordingPicker(calendar: calendar, canChoose: controller.activity == .idle)
                 .disabled(controller.activity == .starting)
             Text("Starting requests microphone and screen/system-audio access. Wear headphones to keep microphone and system audio separate.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(remoteEnabled
+                 ? "After recording, prepared audio will be sent to Hyperion over your tailnet for processing. Change this in Settings before starting to keep processing on this Mac."
+                 : "After recording, audio will be processed on this Mac. Change this in Settings before starting to use Hyperion.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if controller.activity == .starting {
