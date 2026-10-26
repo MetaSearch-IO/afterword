@@ -283,8 +283,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         lock.lock()
         guard accepting, let interval = intervals.last, !failureSent else { lock.unlock(); return }
         guard startUS + Int64(duration * 1_000_000) > interval.startUS else { lock.unlock(); return }
-        guard (pending[source] ?? 0) + duration <= 2 else {
-            lock.unlock(); fail("Audio writing fell more than two seconds behind. Recording was interrupted."); return
+        guard (pending[source] ?? 0) + duration <= 10 else {
+            lock.unlock(); fail("Audio writing fell more than ten seconds behind on the \(source.rawValue) track. Recording was interrupted."); return
         }
         pending[source, default: 0] += duration
         let packet = Packet(sample: sampleBuffer, source: source, startUS: startUS,

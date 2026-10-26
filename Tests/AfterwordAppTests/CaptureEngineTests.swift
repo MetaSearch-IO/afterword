@@ -239,6 +239,18 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(CaptureFailure.describe(CaptureFailure(message: "Existing actionable failure")), "Existing actionable failure")
     }
 
+    func testThreeSecondWriterBacklogRetainsAudio() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { _ in }
+        clock.set(4_000_000)
+        engine.enqueue(try sample(frames: 48_000), source: .microphone, hostTimestamp: .zero)
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.captureState, .stopped)
+        XCTAssertEqual(meeting.chunks.map(\.frameCount), [48_000])
+    }
+
     func testQueueOverflowInterruptsWithoutSavingOversizedBuffer() async throws {
         let (directory, store) = try temporaryStore()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -246,12 +258,12 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
         let clock = Clock()
         let engine = try CaptureEngine(store: store, hostTime: clock.now) { event in
             if case .failed(let message) = event {
-                XCTAssertTrue(message.contains("two seconds"))
+                XCTAssertTrue(message.contains("ten seconds"))
                 failure.fulfill()
             }
         }
-        clock.set(3_000_000)
-        engine.enqueue(try sample(frames: 48_000), source: .microphone, hostTimestamp: .zero)
+        clock.set(12_000_000)
+        engine.enqueue(try sample(frames: 176_000), source: .microphone, hostTimestamp: .zero)
         await fulfillment(of: [failure], timeout: 1)
         let meeting = try await engine.stop(reason: "overflow")
         XCTAssertTrue(meeting.chunks.isEmpty)
