@@ -179,6 +179,36 @@ class RemoteClientTests(unittest.TestCase):
         self.assertEqual(json.loads(output.buffer.getvalue()),
                          {"protocol_version": 1, "run_id": "run", "type": "completed"})
 
+    def test_queued_cancellation_without_worker_event_confirms_cleanup(self):
+        class Response:
+            status = 200
+            def readline(self): return b""
+
+        class Connection:
+            def request(self, *args): pass
+            def getresponse(self): return Response()
+            def close(self): pass
+
+        calls = []
+        def call(method, path, **kwargs):
+            calls.append((method, path))
+            if method == "GET":
+                return b'{"state":"cancelled","events":0}'
+            return b'{"deleted":true}'
+
+        remote = SimpleNamespace(connect=lambda **kwargs: Connection(), call=call)
+        run = Run(SimpleNamespace(meeting="/tmp", run_id="run"), remote)
+        def submit():
+            run.job = "job"
+            run.cancelled.set()
+        output = SimpleNamespace(buffer=io.BytesIO(), flush=lambda: None)
+        with patch.object(run, "submit", side_effect=submit), patch.object(run, "watch_stdin"), \
+             patch("sys.stdout", output):
+            self.assertEqual(run.run(), 2)
+        self.assertEqual(json.loads(output.buffer.getvalue()),
+                         {"protocol_version": 1, "run_id": "run", "type": "cancelled", "stage": "preflight"})
+        self.assertEqual(calls, [("GET", "/v1/jobs/job"), ("DELETE", "/v1/jobs/job")])
+
     def test_remote_outputs_cannot_follow_local_symlink(self):
         with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as outside:
             root = Path(folder)

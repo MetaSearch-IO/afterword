@@ -433,6 +433,9 @@ class Run:
                 finally:
                     conn.close()
                 status = json.loads(self.remote.call("GET", f"/v1/jobs/{self.job}"))
+                if status["state"] == "cancelled" and self.cancelled.is_set():
+                    return 2, {"protocol_version": 1, "run_id": self.args.run_id,
+                               "type": "cancelled", "stage": "preflight"}
                 if status["state"] in {"done", "failed", "cancelled"} and status["events"] <= index:
                     return 1, self.failed_event("The remote worker exited without a result.", "processing")
             except ArtifactRejected as error:
