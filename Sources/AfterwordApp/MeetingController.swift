@@ -91,28 +91,28 @@ final class MeetingController: ObservableObject {
         }
         if rootURL == nil {
             do {
-                localControl = try LocalControlServer { [weak self] id in
-                    self?.processFromCLI(id: id) ?? .rejected("Afterword is closing.")
+                localControl = try LocalControlServer { [weak self] command, id in
+                    self?.processFromCLI(id: id, summaryOnly: command == "notes") ?? .rejected("Afterword is closing.")
                 }
             } catch { message = "Local CLI unavailable: \(error.localizedDescription)" }
         }
     }
 
-    func processFromCLI(id: String) -> LocalControlReply {
+    func processFromCLI(id: String, summaryOnly: Bool = false) -> LocalControlReply {
         do {
             let meeting = try store.load(id: id)
             if processing.isMeetingBusy(id) {
                 return .accepted(status: meeting.processingStatus, runID: meeting.processingRunID)
             }
             if isLoading { return .rejected("Afterword is still loading.") }
-            if meeting.activeRevisionID != nil,
+            if !summaryOnly, meeting.activeRevisionID != nil,
                (try? processing.loadTranscript(meeting).speakerLabelsPending) != true {
                 return .rejected("This meeting already has a saved transcript. Use the app to confirm reprocessing.")
             }
-            guard canProcess(meeting) else {
+            guard canProcess(meeting, summaryOnly: summaryOnly) else {
                 return .rejected("This recording cannot be processed while recording, loading, or cleaning up.")
             }
-            processing.start(meeting)
+            processing.start(meeting, summaryOnly: summaryOnly)
             let updated = try store.load(id: id)
             guard updated.processingRunID != meeting.processingRunID else {
                 return .rejected(processing.message ?? "Afterword did not queue this recording.")

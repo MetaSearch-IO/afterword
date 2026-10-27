@@ -15,6 +15,48 @@ NOTE_FIELDS = ("overview", "discussion_points", "decisions", "open_questions")
 SELF_COMMITMENT = re.compile(r"^(?:I (?:will|shall|am going to|am responsible for)\b|I['’]ll\b|我(?:会|来|将|负责|承担)|由我(?:来|负责|承担))", re.IGNORECASE)
 
 
+def assemble_segment_text(segments):
+    text = ""
+    for segment in segments:
+        part = segment["text"].strip()
+        if text and part and not (part[0] in ",.!?;:，。！？；：)]}"
+                                   or "\u3400" <= text[-1] <= "\u9fff" and "\u3400" <= part[0] <= "\u9fff"):
+            text += " "
+        text += part
+    return text
+
+
+def action_span(refs, segments):
+    require(0 < len(refs) <= 16, "An action quote must cite one bounded transcript span.")
+    positions = {segment["id"]: position for position, segment in enumerate(segments)}
+    require(all(ref in positions for ref in refs), "An action quote references unknown transcript evidence.")
+    first = positions[refs[0]]
+    require([segment["id"] for segment in segments[first:first + len(refs)]] == refs,
+            "Action evidence must be consecutive transcript segments in source order.")
+    span = segments[first:first + len(refs)]
+    require(all(segment.get("source") == span[0].get("source")
+                and (len(span) == 1 or not segment.get("overlap")) for segment in span),
+            "Action evidence must have one source without overlap.")
+    speakers = [segment.get("speaker_id") for segment in span]
+    unknown = [position for position, speaker in enumerate(speakers) if speaker is None]
+    bridged = (len(unknown) == 1 and 0 < unknown[0] < len(span) - 1
+               and speakers[0] is not None and all(speaker in {speakers[0], None} for speaker in speakers)
+               and speakers[unknown[0] - 1] == speakers[unknown[0] + 1] == speakers[0])
+    if bridged:
+        part = span[unknown[0]]
+        bridged = (type(part.get("start_us")) is int and type(part.get("end_us")) is int
+                   and 0 < part["end_us"] - part["start_us"] <= 1_500_000)
+    require(len(set(speakers)) == 1 or bridged, "Action evidence crosses a speaker change.")
+    if len(span) > 1 and "start_us" in span[0] and "end_us" in span[-1]:
+        require(span[-1]["end_us"] - span[0]["start_us"] <= 12_000_000,
+                "Action evidence exceeds one utterance.")
+    for left, right in zip(span, span[1:]):
+        if "end_us" in left and "start_us" in right:
+            require(0 <= right["start_us"] - left["end_us"] <= 1_500_000,
+                    "Action evidence crosses an overlap or long pause.")
+    return span
+
+
 def require(condition, message):
     if not condition:
         raise WorkerError("invalid_artifact", message)
@@ -165,8 +207,10 @@ def validate_notes(value: dict, segments: list[dict], allowed: set[str] | None =
                     and len(set(refs)) == len(refs), "Summary references invalid transcript evidence.")
             if field != "action_items":
                 continue
-            require(len(refs) == 1 and item["text"] in index[refs[0]]["text"],
-                    "Action text must quote exactly one source segment, preserving its named owner.")
+            span = action_span(refs, segments)
+            quote = span[0]["text"] if len(refs) == 1 else assemble_segment_text(span)
+            require(item["text"] == quote if len(refs) > 1 else item["text"] in quote,
+                    "Action text must quote its exact contiguous transcript evidence.")
             for key, evidence_key in (("owner_speaker_id", "owner_evidence_segment_ids"), ("due_date", "due_date_evidence_segment_ids")):
                 require(key in item and evidence_key in item, "Action evidence fields are missing.")
                 evidence = item[evidence_key]
@@ -175,12 +219,15 @@ def validate_notes(value: dict, segments: list[dict], allowed: set[str] | None =
                     require(not evidence, "Null action attributes must not claim evidence.")
                 else:
                     require(isinstance(item[key], str) and evidence, "Action attributes require explicit evidence.")
+                    action_span(evidence, segments)
                     if key == "owner_speaker_id":
                         require(SELF_COMMITMENT.match(item["text"]) is not None
-                                and any(index[ref].get("speaker_id") == item[key] for ref in evidence),
+                                and span[0].get("speaker_id") == item[key]
+                                and SELF_COMMITMENT.match(assemble_segment_text([index[ref] for ref in evidence])) is not None,
                                 "Action owner requires an explicit first-person commitment in its exact evidence quote.")
                     else:
-                        require(any(item[key].casefold() in index[ref]["text"].casefold() for ref in evidence), "Action due date is not explicit in its evidence.")
+                        require(item[key].casefold() in assemble_segment_text([index[ref] for ref in evidence]).casefold(),
+                                "Action due date is not explicit in its evidence.")
     return value
 
 

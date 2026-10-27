@@ -28,20 +28,23 @@ final class LocalControlServerTests: XCTestCase {
                                                 attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let socket = directory.appendingPathComponent("control.sock")
-        let server = try LocalControlServer(socketURL: socket) { id in
-            .accepted(status: "queued", runID: id)
+        let server = try LocalControlServer(socketURL: socket) { command, id in
+            .accepted(status: "queued", runID: "\(command):\(id)")
         }
         defer { server.stop() }
         let data = try await Task.detached { try sendLocalCommand(socket: socket) }.value
         let reply = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(reply["ok"] as? Bool, true)
         XCTAssertEqual(reply["status"] as? String, "queued")
-        XCTAssertEqual(reply["run_id"] as? String, "test-id")
+        XCTAssertEqual(reply["run_id"] as? String, "process:test-id")
+        let notes = try await Task.detached { try sendLocalCommand(socket: socket, command: "notes") }.value
+        let notesReply = try XCTUnwrap(JSONSerialization.jsonObject(with: notes) as? [String: Any])
+        XCTAssertEqual(notesReply["run_id"] as? String, "notes:test-id")
     }
 }
 
-private func sendLocalCommand(socket: URL) throws -> Data {
-    let line = "{\"command\":\"process\",\"meeting_id\":\"test-id\"}\n"
+private func sendLocalCommand(socket: URL, command: String = "process") throws -> Data {
+    let line = "{\"command\":\"\(command)\",\"meeting_id\":\"test-id\"}\n"
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)

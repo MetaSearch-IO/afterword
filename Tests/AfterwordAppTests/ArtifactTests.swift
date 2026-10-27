@@ -41,6 +41,33 @@ final class ArtifactTests: XCTestCase {
         XCTAssertThrowsError(try Artifacts.validate(notes(ref: "s1", owner: nil, due: nil, text: "Send report"), transcript: transcript, summaryID: "summary"))
     }
 
+    func testMultiSegmentActionKeepsExactQuoteAndBoundedOwnerEvidence() throws {
+        let segments = [TranscriptSegment(id: "s1", source: .system, start_us: 0, end_us: 500_000,
+                          text: "I'll send", speaker_id: "grant", attribution_reason: "exclusive", overlap: false),
+                        TranscriptSegment(id: "s2", source: .system, start_us: 500_000, end_us: 900_000,
+                          text: "a spreadsheet", speaker_id: nil, attribution_reason: "incomplete_speaker_timing", overlap: false),
+                        TranscriptSegment(id: "s3", source: .system, start_us: 900_000, end_us: 1_300_000,
+                          text: "for projections tomorrow", speaker_id: "grant", attribution_reason: "exclusive", overlap: false)]
+        let transcript = Transcript(schema_version: 1, run_id: "run", meeting_id: "meeting", revision_id: "revision",
+                                    segments: segments, speakers: [TranscriptSpeaker(id: "grant", source: .system, label: "Grant")],
+                                    coverage: [TranscriptCoverage(source: .system, start_us: 0, end_us: 1_300_000)], warnings: [])
+        func notes(_ text: String, refs: [String], ownerRefs: [String]) -> MeetingSummary {
+            MeetingSummary(schema_version: 1, run_id: "summary-run", meeting_id: "meeting", revision_id: "revision",
+                summary_id: "summary", name_map_revision: "hash", covered_segment_ids: ["s1", "s2", "s3"],
+                overview: [], discussion_points: [], decisions: [], action_items: [SummaryAction(text: text,
+                    segment_ids: refs, owner_speaker_id: "grant", owner_evidence_segment_ids: ownerRefs,
+                    due_date: "tomorrow", due_date_evidence_segment_ids: ["s3"])], open_questions: [])
+        }
+        try Artifacts.validate(notes("I'll send a spreadsheet for projections tomorrow", refs: ["s1", "s2", "s3"], ownerRefs: ["s1"]),
+                               transcript: transcript, summaryID: "summary")
+        XCTAssertThrowsError(try Artifacts.validate(notes("I'll send projections tomorrow", refs: ["s1", "s2", "s3"], ownerRefs: ["s1"]),
+                                                  transcript: transcript, summaryID: "summary"))
+        XCTAssertThrowsError(try Artifacts.validate(notes("I'll send a spreadsheet for projections tomorrow", refs: ["s1", "s3"], ownerRefs: ["s1"]),
+                                                  transcript: transcript, summaryID: "summary"))
+        XCTAssertThrowsError(try Artifacts.validate(notes("I'll send a spreadsheet for projections tomorrow", refs: ["s1", "s2", "s3"], ownerRefs: ["s2"]),
+                                                  transcript: transcript, summaryID: "summary"))
+    }
+
     func testNameMapHashIsStableAndChangesOnRename() throws {
         XCTAssertEqual(try Artifacts.nameMapRevision(["a": "甲", "b": "Bob"]), try Artifacts.nameMapRevision(["b": "Bob", "a": "甲"]))
         XCTAssertNotEqual(try Artifacts.nameMapRevision(["a": "甲"]), try Artifacts.nameMapRevision(["a": "乙"]))
