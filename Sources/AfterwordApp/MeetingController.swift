@@ -417,25 +417,29 @@ final class MeetingController: ObservableObject {
     }
 
     func play(_ segment: TranscriptSegment, in meeting: Meeting) {
+        play(source: segment.source, startUS: segment.start_us, endUS: segment.end_us, in: meeting)
+    }
+
+    func play(source: AudioSource, startUS: Int64, endUS: Int64, in meeting: Meeting) {
         guard activity == .idle, deletingMeetingID != meeting.id else { return }
         guard !meeting.audioUnavailable else { message = "Saved audio was removed from this meeting."; return }
         do {
-            let chunks = meeting.chunks.filter { $0.source == segment.source && $0.startUS < segment.end_us && $0.endUS > segment.start_us }
+            let chunks = meeting.chunks.filter { $0.source == source && $0.startUS < endUS && $0.endUS > startUS }
                 .sorted { $0.startUS < $1.startUS }
             guard let first = chunks.first else {
                 throw CaptureFailure(message: "The evidence audio chunk is unavailable.")
             }
             stopPlayback()
             let parts = try chunks.map { chunk in
-                let start = max(segment.start_us, chunk.startUS)
-                let end = min(segment.end_us, chunk.endUS)
+                let start = max(startUS, chunk.startUS)
+                let end = min(endUS, chunk.endUS)
                 return EvidencePlayback.Part(url: try store.artifactURL(meetingID: meeting.id, relativePath: chunk.relativePath),
                     offset: Double(start - chunk.startUS) / 1_000_000, duration: Double(end - start) / 1_000_000)
             }
             try playback?.play(parts)
             playbackMeetingID = meeting.id
-            let offset = Double(segment.start_us - first.startUS) / 1_000_000
-            playbackInfo = "\(segment.source.rawValue) · \(String(format: "%.3f", Double(segment.start_us) / 1_000_000))–\(String(format: "%.3f", Double(segment.end_us) / 1_000_000)) s · file offset \(String(format: "%.3f", offset)) s"
+            let offset = Double(startUS - first.startUS) / 1_000_000
+            playbackInfo = "\(source.rawValue) · \(String(format: "%.3f", Double(startUS) / 1_000_000))–\(String(format: "%.3f", Double(endUS) / 1_000_000)) s · file offset \(String(format: "%.3f", offset)) s"
         } catch { message = error.localizedDescription }
     }
 

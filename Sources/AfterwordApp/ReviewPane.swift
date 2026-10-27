@@ -166,7 +166,9 @@ struct ReviewPane: View {
                             }
                             LazyVStack(alignment: .leading, spacing: 2) {
                                 let matches = Set(searchMatches)
-                                ForEach(transcript.segments) { segment in
+                                let compact = !showTranscriptDetails && !showSearch && !correctingSpeakers
+                                ForEach(TranscriptRows.make(transcript.segments, compact: compact)) { row in
+                                    let segment = row.segments[0]
                                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                                         if correctingSpeakers {
                                             if eligibleForCorrection(segment) {
@@ -181,22 +183,22 @@ struct ReviewPane: View {
                                                     .disabled(!canCorrect)
                                             } else { Color.clear.frame(width: 14, height: 14) }
                                         }
-                                        Text(timestamp(segment.start_us))
+                                        Text(timestamp(row.startUS))
                                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                             .frame(width: 52, alignment: .leading)
-                                        Button { controller.play(segment, in: meeting) } label: { Image(systemName: "play.circle") }
+                                        Button { controller.play(source: row.source, startUS: row.startUS, endUS: row.endUS, in: meeting) } label: { Image(systemName: "play.circle") }
                                             .buttonStyle(.plain)
                                             .foregroundStyle(.secondary)
-                                            .help("Play this segment's retained audio")
-                                            .accessibilityLabel("Play segment at \(timestamp(segment.start_us))")
+                                            .help("Play this passage's retained audio")
+                                            .accessibilityLabel("Play passage at \(timestamp(row.startUS))")
                                             .disabled(controller.activity != .idle || meeting.audioUnavailable)
-                                        Text(speakerName(segment.speaker_id))
+                                        Text(speakerName(row.speakerID))
                                             .font(.subheadline.weight(.medium))
                                             .lineLimit(1)
                                             .frame(width: 96, alignment: .leading)
-                                            .help(speakerName(segment.speaker_id))
+                                            .help(speakerName(row.speakerID))
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(segment.text).textSelection(.enabled)
+                                            Text(row.text).textSelection(.enabled)
                                                 .fixedSize(horizontal: false, vertical: true)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
                                             if showTranscriptDetails && (segment.speaker_id == nil || segment.overlap) {
@@ -207,15 +209,20 @@ struct ReviewPane: View {
                                     }
                                     .padding(.vertical, 4)
                                     .padding(.horizontal, 2)
-                                    .background(selectedSegment == segment.id ? Color.accentColor.opacity(0.12)
-                                        : (matches.contains(segment.id) ? Color.yellow.opacity(0.12) : Color.clear))
+                                    .background(row.segments.contains { $0.id == selectedSegment } ? Color.accentColor.opacity(0.12)
+                                        : (row.segments.contains { matches.contains($0.id) } ? Color.yellow.opacity(0.12) : Color.clear))
                                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                                    .id(segment.id)
+                                    .id(row.id)
                                 }
                             }
                         }
                         .onChange(of: selectedSegment) { _, selected in
-                            if let selected { withAnimation { proxy.scrollTo(selected, anchor: .center) } }
+                            if let selected {
+                                let compact = !showTranscriptDetails && !showSearch && !correctingSpeakers
+                                let target = TranscriptRows.make(transcript.segments, compact: compact)
+                                    .first { $0.segments.contains { $0.id == selected } }?.id ?? selected
+                                withAnimation { proxy.scrollTo(target, anchor: .center) }
+                            }
                         }
                         .onChange(of: searchNavigation) { _, _ in
                             if let selectedSegment { withAnimation { proxy.scrollTo(selectedSegment, anchor: .center) } }
@@ -482,6 +489,7 @@ struct ReviewPane: View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: 65, maximum: 100))], alignment: .leading) {
             ForEach(ids, id: \.self) { id in
                 Button {
+                    showTranscriptDetails = true
                     selectedSegment = id
                 } label: {
                     Text(transcript?.segments.first(where: { $0.id == id }).map { timestamp($0.start_us) } ?? id)
