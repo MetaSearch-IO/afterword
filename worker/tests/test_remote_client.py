@@ -153,13 +153,21 @@ class RemoteClientTests(unittest.TestCase):
             with self.assertRaises(UploadCancelled):
                 body.read(5)
 
-    def test_remote_process_group_ids_are_not_forwarded_to_mac(self):
-        event = {"protocol_version": 1, "run_id": "run", "type": "completed",
-                 "process_group_id": 123, "process_group_finished": True}
+    def test_remote_process_group_events_do_not_end_mac_stage(self):
+        events = [
+            {"protocol_version": 1, "run_id": "run", "type": "stage_started", "stage": "asr"},
+            {"protocol_version": 1, "run_id": "run", "type": "stage_started", "stage": "asr", "process_group_id": 123},
+            {"protocol_version": 1, "run_id": "run", "type": "stage_completed", "stage": "asr",
+             "process_group_id": 123, "process_group_finished": True},
+            {"protocol_version": 1, "run_id": "run", "type": "stage_progress", "stage": "asr",
+             "completed": 1, "total": 2, "progress_unit": "audio_windows", "progress_phase": "windows"},
+            {"protocol_version": 1, "run_id": "run", "type": "stage_completed", "stage": "asr"},
+            {"protocol_version": 1, "run_id": "run", "type": "completed"},
+        ]
 
         class Response:
             status = 200
-            def __init__(self): self.lines = [json.dumps(event).encode() + b"\n", b""]
+            def __init__(self): self.lines = [json.dumps(event).encode() + b"\n" for event in events] + [b""]
             def readline(self): return self.lines.pop(0)
 
         class Connection:
@@ -170,14 +178,16 @@ class RemoteClientTests(unittest.TestCase):
         remote = SimpleNamespace(connect=lambda **kwargs: Connection())
         run = Run(SimpleNamespace(meeting="/tmp", run_id="run"), remote)
         run.job = "job"
-        run.pull = lambda: None
+        pulls = []
+        run.pull = lambda: pulls.append(True)
         output = SimpleNamespace(buffer=io.BytesIO(), flush=lambda: None)
         with patch("sys.stdout", output):
             code, terminal = run.relay()
             self.assertEqual(code, 0)
             run.emit_event(terminal)
-        self.assertEqual(json.loads(output.buffer.getvalue()),
-                         {"protocol_version": 1, "run_id": "run", "type": "completed"})
+        self.assertEqual([json.loads(line)["type"] for line in output.buffer.getvalue().splitlines()],
+                         ["stage_started", "stage_progress", "stage_completed", "completed"])
+        self.assertEqual(len(pulls), 2)
 
     def test_queued_cancellation_without_worker_event_confirms_cleanup(self):
         class Response:
@@ -362,8 +372,7 @@ class RemoteClientTests(unittest.TestCase):
                 finally:
                     os.close(write_fd)
                 events = [json.loads(line) for line in output.buffer.getvalue().splitlines()]
-                self.assertEqual([event["type"] for event in events], ["started", "stage_completed", "completed"])
-                self.assertNotIn("process_group_id", events[1])
+                self.assertEqual([event["type"] for event in events], ["started", "completed"])
                 self.assertTrue((root / "revisions/next/transcript.json").is_file())
                 self.assertEqual(sorted(state["uploaded"]), ["meeting.json", "work/run/microphone.wav",
                     "work/run/names.json", "work/run/prepared.json"])

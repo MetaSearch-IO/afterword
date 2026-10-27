@@ -26,9 +26,11 @@ if [[ "$afterword_signing_identity" == "-" ]]; then
 fi
 
 swift build --cache-path "$project_root/.cache/swiftpm" --product Afterword
+swift build --cache-path "$project_root/.cache/swiftpm" --product afterwordctl
 binary_dir="$(swift build --cache-path "$project_root/.cache/swiftpm" --show-bin-path)"
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
 cp "$binary_dir/Afterword" "$app_path/Contents/MacOS/Afterword"
+cp "$binary_dir/afterwordctl" "$app_path/Contents/MacOS/afterwordctl"
 cp App/Info.plist "$app_path/Contents/Info.plist"
 cp App/Assets/Afterword.icns "$app_path/Contents/Resources/Afterword.icns"
 cp worker/afterword_remote_client.py "$app_path/Contents/Resources/afterword_remote_client.py"

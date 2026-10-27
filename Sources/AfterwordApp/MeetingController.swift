@@ -40,6 +40,7 @@ final class MeetingController: ObservableObject {
     private var quitting = false
     private var playback: EvidencePlayback?
     private var playbackMeetingID: String?
+    private var localControl: LocalControlServer?
     private var deletionTask: Task<Void, Error>?
     private var recoveryInFlight = false
     private let requestMicrophoneAccess: @MainActor () async -> Bool
@@ -88,6 +89,35 @@ final class MeetingController: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        if rootURL == nil {
+            do {
+                localControl = try LocalControlServer { [weak self] id in
+                    self?.processFromCLI(id: id) ?? .rejected("Afterword is closing.")
+                }
+            } catch { message = "Local CLI unavailable: \(error.localizedDescription)" }
+        }
+    }
+
+    func processFromCLI(id: String) -> LocalControlReply {
+        do {
+            let meeting = try store.load(id: id)
+            if processing.isMeetingBusy(id) {
+                return .accepted(status: meeting.processingStatus, runID: meeting.processingRunID)
+            }
+            if isLoading { return .rejected("Afterword is still loading.") }
+            guard meeting.activeRevisionID == nil else {
+                return .rejected("This meeting already has a transcript. Use the app to confirm reprocessing.")
+            }
+            guard canProcess(meeting) else {
+                return .rejected("This recording cannot be processed while recording, loading, or cleaning up.")
+            }
+            processing.start(meeting)
+            let updated = try store.load(id: id)
+            guard updated.processingRunID != meeting.processingRunID else {
+                return .rejected(processing.message ?? "Afterword did not queue this recording.")
+            }
+            return .accepted(status: updated.processingStatus, runID: updated.processingRunID)
+        } catch { return .rejected(error.localizedDescription) }
     }
 
     private func recoverMeetings() {
@@ -286,6 +316,7 @@ final class MeetingController: ObservableObject {
         if engine != nil { await finish() }
         let ready = await processing.prepareToQuit()
         if !ready { quitting = false }
+        if ready { localControl?.stop() }
         return ready
     }
 

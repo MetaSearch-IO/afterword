@@ -424,6 +424,9 @@ class Run:
                             continue
                         event = json.loads(line)
                         kind = event.get("type")
+                        if event.get("process_group_id") is not None:
+                            index += 1
+                            continue
                         if kind == "stage_completed" or kind in {"completed", "failed", "cancelled"}:
                             self.pull()
                         index += 1
