@@ -105,8 +105,9 @@ final class MeetingController: ObservableObject {
                 return .accepted(status: meeting.processingStatus, runID: meeting.processingRunID)
             }
             if isLoading { return .rejected("Afterword is still loading.") }
-            guard meeting.activeRevisionID == nil else {
-                return .rejected("This meeting already has a transcript. Use the app to confirm reprocessing.")
+            if meeting.activeRevisionID != nil,
+               (try? processing.loadTranscript(meeting).speakerLabelsPending) != true {
+                return .rejected("This meeting already has a saved transcript. Use the app to confirm reprocessing.")
             }
             guard canProcess(meeting) else {
                 return .rejected("This recording cannot be processed while recording, loading, or cleaning up.")
