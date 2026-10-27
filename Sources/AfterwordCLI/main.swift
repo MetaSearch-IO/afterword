@@ -73,20 +73,24 @@ private enum AfterwordCLI {
 
     private static func run(_ arguments: [String]) throws {
         guard let command = arguments.first else {
-            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | process [ID|latest] | notes [ID|latest] | watch [ID|latest]")
+            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
             return
         }
         if command == "--help" || command == "help" {
-            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | process [ID|latest] | notes [ID|latest] | watch [ID|latest]")
+            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
             return
         }
-        guard ["list", "status", "process", "notes", "watch"].contains(command) else {
+        guard ["list", "status", "process", "notes", "label", "watch"].contains(command) else {
             throw CommandError(message: "Unknown command: \(command). Run afterwordctl --help.")
         }
         let json = arguments.contains("--json")
         let operands = arguments.dropFirst().filter { $0 != "--json" }
-        guard operands.count <= (command == "list" ? 0 : 1) else {
-            throw CommandError(message: "Too many arguments for \(command).")
+        if command == "label" {
+            guard operands.count == 3 else { throw CommandError(message: "Usage: afterwordctl label ID SEGMENT_ID SPEAKER_ID") }
+        } else {
+            guard operands.count <= (command == "list" ? 0 : 1) else {
+                throw CommandError(message: "Too many arguments for \(command).")
+            }
         }
         let saved = try store.list()
         if command == "list" {
@@ -94,6 +98,22 @@ private enum AfterwordCLI {
             for meeting in saved {
                 print("\(meeting.startedAt)  \(meeting.processingStatus)  \(meeting.title)  \(meeting.id)")
             }
+            return
+        }
+        if command == "label" {
+            let id = operands[operands.startIndex]
+            let segment = operands[operands.index(after: operands.startIndex)]
+            let speaker = operands[operands.index(operands.startIndex, offsetBy: 2)]
+            let before = try? store.load(id: id)
+            let reply: CommandReply
+            do { reply = try requestProcessing(id: id, command: command, fields: ["segment_id": segment, "speaker_id": speaker]) }
+            catch {
+                guard let current = try? store.load(id: id), current.activeRevisionID != before?.activeRevisionID,
+                      current.processingStatus == "transcript_ready" else { throw error }
+                reply = CommandReply(ok: true, status: current.processingStatus, runID: nil, error: nil)
+            }
+            guard reply.ok else { throw CommandError(message: reply.error ?? "The app rejected the speaker label.") }
+            if json { try printJSON(reply) } else { print(reply.status ?? "transcript_ready") }
             return
         }
         let selector = operands.first ?? "latest"
@@ -150,7 +170,7 @@ private enum AfterwordCLI {
         print(String(decoding: try encoder.encode(value), as: UTF8.self))
     }
 
-    private static func requestProcessing(id: String, command: String) throws -> CommandReply {
+    private static func requestProcessing(id: String, command: String, fields: [String: String] = [:]) throws -> CommandReply {
         var descriptor = connectToApp()
         if descriptor < 0 {
             let app = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/Afterword.app")
@@ -171,7 +191,7 @@ private enum AfterwordCLI {
         }
         guard descriptor >= 0 else { throw CommandError(message: "Afterword did not open its local command socket.") }
         for attempt in 0..<40 {
-            let reply = try sendProcessing(id: id, command: command, descriptor: descriptor)
+            let reply = try sendProcessing(id: id, command: command, fields: fields, descriptor: descriptor)
             if reply.error != "Afterword is still loading." { return reply }
             if attempt == 39 { break }
             Thread.sleep(forTimeInterval: 0.25)
@@ -181,13 +201,13 @@ private enum AfterwordCLI {
         throw CommandError(message: "Afterword did not finish loading.")
     }
 
-    private static func sendProcessing(id: String, command: String, descriptor: Int32) throws -> CommandReply {
+    private static func sendProcessing(id: String, command: String, fields: [String: String], descriptor: Int32) throws -> CommandReply {
         defer { close(descriptor) }
-        var timeout = timeval(tv_sec: 5, tv_usec: 0)
+        var timeout = timeval(tv_sec: 20, tv_usec: 0)
         _ = withUnsafePointer(to: &timeout) {
             setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
         }
-        let request = try JSONSerialization.data(withJSONObject: ["command": command, "meeting_id": id]) + Data([10])
+        let request = try JSONSerialization.data(withJSONObject: fields.merging(["command": command, "meeting_id": id]) { _, required in required }) + Data([10])
         let wrote = request.withUnsafeBytes { bytes -> Bool in
             guard let base = bytes.baseAddress else { return false }
             var sent = 0

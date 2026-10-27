@@ -317,6 +317,7 @@ class PipelineTests(unittest.TestCase):
             transcript_bytes = transcript_path.read_bytes()
             self.assertIn('"transcript_path"', events.getvalue())
             self.assertEqual((root / "meeting.json").read_bytes(), original)
+            (root / "revisions/revision1/summaries").rmdir()
             args.run_id, args.summary_id, args.summary_only, args.prepared = "run2", "summary2", True, None
             notes = {key: [] for key in (*NOTE_FIELDS, "action_items")}
             notes["overview"] = [{"text": "Release planning", "segment_ids": ["seg-000001"]}]

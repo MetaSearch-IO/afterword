@@ -3,6 +3,7 @@ import Foundation
 import Darwin
 
 public final class MeetingStore {
+    private static let identifierCharacters = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
     public let rootURL: URL
     public private(set) var recoveryIssues: [String] = []
     public private(set) var busyMeetingIDs: [String] = []
@@ -183,7 +184,7 @@ public final class MeetingStore {
 
     private func validateID(_ id: String) throws {
         guard !id.isEmpty, id.count <= 128,
-              id.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_").contains($0) }) else {
+              id.unicodeScalars.allSatisfy({ Self.identifierCharacters.contains($0) }) else {
             throw StoreError.invalid("Invalid artifact identifier.")
         }
     }

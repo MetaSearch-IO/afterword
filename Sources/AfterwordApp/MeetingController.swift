@@ -91,8 +91,17 @@ final class MeetingController: ObservableObject {
         }
         if rootURL == nil {
             do {
-                localControl = try LocalControlServer { [weak self] command, id in
-                    self?.processFromCLI(id: id, summaryOnly: command == "notes") ?? .rejected("Afterword is closing.")
+                localControl = try LocalControlServer { [weak self] request in
+                    guard let self, let command = request["command"], let id = request["meeting_id"] else {
+                        return .rejected("Afterword is closing.")
+                    }
+                    if command == "label" {
+                        guard let segment = request["segment_id"], let speaker = request["speaker_id"] else {
+                            return .rejected("A segment and speaker are required.")
+                        }
+                        return self.labelFromCLI(id: id, segmentID: segment, speakerID: speaker)
+                    }
+                    return self.processFromCLI(id: id, summaryOnly: command == "notes")
                 }
             } catch { message = "Local CLI unavailable: \(error.localizedDescription)" }
         }
@@ -118,6 +127,18 @@ final class MeetingController: ObservableObject {
                 return .rejected(processing.message ?? "Afterword did not queue this recording.")
             }
             return .accepted(status: updated.processingStatus, runID: updated.processingRunID)
+        } catch { return .rejected(error.localizedDescription) }
+    }
+
+    func labelFromCLI(id: String, segmentID: String, speakerID: String) -> LocalControlReply {
+        do {
+            if isLoading { return .rejected("Afterword is still loading.") }
+            let meeting = try store.load(id: id)
+            guard let revision = meeting.activeRevisionID else { return .rejected("This meeting has no saved transcript.") }
+            let corrected = try SpeakerCorrections.assign(store: store, meetingID: id, expectedRevisionID: revision,
+                                                           segmentIDs: [segmentID], speakerID: speakerID)
+            reload()
+            return .accepted(status: corrected.processingStatus, runID: nil)
         } catch { return .rejected(error.localizedDescription) }
     }
 

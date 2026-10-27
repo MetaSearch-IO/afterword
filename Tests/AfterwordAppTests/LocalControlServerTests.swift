@@ -28,8 +28,9 @@ final class LocalControlServerTests: XCTestCase {
                                                 attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: directory) }
         let socket = directory.appendingPathComponent("control.sock")
-        let server = try LocalControlServer(socketURL: socket) { command, id in
-            .accepted(status: "queued", runID: "\(command):\(id)")
+        let server = try LocalControlServer(socketURL: socket) { request in
+            .accepted(status: "queued", runID: [request["command"], request["meeting_id"],
+                                                request["segment_id"], request["speaker_id"]].compactMap { $0 }.joined(separator: ":"))
         }
         defer { server.stop() }
         let data = try await Task.detached { try sendLocalCommand(socket: socket) }.value
@@ -40,11 +41,16 @@ final class LocalControlServerTests: XCTestCase {
         let notes = try await Task.detached { try sendLocalCommand(socket: socket, command: "notes") }.value
         let notesReply = try XCTUnwrap(JSONSerialization.jsonObject(with: notes) as? [String: Any])
         XCTAssertEqual(notesReply["run_id"] as? String, "notes:test-id")
+        let label = try await Task.detached { try sendLocalCommand(socket: socket, command: "label",
+                                                                    fields: ["segment_id": "seg-1", "speaker_id": "speaker-1"]) }.value
+        let labelReply = try XCTUnwrap(JSONSerialization.jsonObject(with: label) as? [String: Any])
+        XCTAssertEqual(labelReply["run_id"] as? String, "label:test-id:seg-1:speaker-1")
     }
 }
 
-private func sendLocalCommand(socket: URL, command: String = "process") throws -> Data {
-    let line = "{\"command\":\"\(command)\",\"meeting_id\":\"test-id\"}\n"
+private func sendLocalCommand(socket: URL, command: String = "process", fields: [String: String] = [:]) throws -> Data {
+    let request = fields.merging(["command": command, "meeting_id": "test-id"]) { _, required in required }
+    let line = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self) + "\n"
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)
     address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)

@@ -299,7 +299,10 @@ def process(args, control):
                                           "max_validation_retries": 1, "template": "qwen2.5-chatml"},
                        "covered_segment_ids": [segment["id"] for segment in transcript["segments"]], **notes}
             validate_summary(summary, transcript, args.summary_id)
-            summary_path = revision / "summaries" / f"{args.summary_id}.json"
+            summary_dir = revision / "summaries"
+            require(not summary_dir.is_symlink(), "Summary directory cannot be a symlink.")
+            summary_dir.mkdir(mode=0o700, exist_ok=True)
+            summary_path = summary_dir / f"{args.summary_id}.json"
             control.check()
             atomic_json(summary_path, summary)
             control.emit("stage_completed", stage="summary", revision_id=args.revision_id, summary_id=args.summary_id,
