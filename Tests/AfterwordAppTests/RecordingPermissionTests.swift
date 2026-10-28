@@ -5,6 +5,22 @@ import XCTest
 @testable import AfterwordApp
 
 final class RecordingPermissionTests: XCTestCase {
+    @MainActor
+    func testOnlySelectedMicrophoneDisconnectInterruptsRecording() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-device-disconnect-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let controller = MeetingController(rootURL: root)
+        let deadline = Date().addingTimeInterval(3)
+        while controller.isLoading && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(controller.isLoading)
+        controller.activity = .recording
+        controller.activeMicrophoneID = "selected-microphone"
+        controller.audioDeviceDisconnected(id: "other-audio-device")
+        XCTAssertEqual(controller.activity, .recording)
+        controller.audioDeviceDisconnected(id: "selected-microphone")
+        XCTAssertEqual(controller.activity, .finalizing)
+    }
+
     func testSystemPermissionDenialExplainsEnabledButStaleGrantWithoutRawTCCError() {
         let error = NSError(domain: SCStreamErrorDomain, code: SCStreamError.Code.userDeclined.rawValue,
                             userInfo: [NSLocalizedDescriptionKey: "The user declined TCCs for application, window, display capture"])

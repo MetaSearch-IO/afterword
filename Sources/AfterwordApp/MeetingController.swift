@@ -31,6 +31,7 @@ final class MeetingController: ObservableObject {
     let processing: ProcessingController
     let calendar: CalendarController
     private var engine: CaptureEngine?
+    var activeMicrophoneID: String?
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var lastSampleAt: [AudioSource: Date] = [:]
@@ -84,7 +85,8 @@ final class MeetingController: ObservableObject {
         observers.append(NotificationCenter.default.addObserver(
             forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: .main) { [weak self] notification in
                 guard let device = notification.object as? AVCaptureDevice, device.hasMediaType(.audio) else { return }
-                Task { @MainActor in self?.interrupt("An audio capture device disconnected.") }
+                let disconnectedID = device.uniqueID
+                Task { @MainActor in self?.audioDeviceDisconnected(id: disconnectedID) }
             })
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
@@ -229,6 +231,7 @@ final class MeetingController: ObservableObject {
                 guard let device = AVCaptureDevice.default(for: .audio) else {
                     throw CaptureFailure(message: "No microphone is available. Connect one before recording.")
                 }
+                activeMicrophoneID = device.uniqueID
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 guard !quitting, pendingInterruption == nil else { throw CancellationError() }
                 guard let display = content.displays.first else {
@@ -254,6 +257,7 @@ final class MeetingController: ObservableObject {
                 permissionIssue = RecordingPermissionIssue.identify(error)
                 if let engine { _ = try? await engine.stop(reason: detail) }
                 engine = nil
+                activeMicrophoneID = nil
                 sessionToken = nil
                 activity = .idle
                 message = detail
@@ -300,7 +304,13 @@ final class MeetingController: ObservableObject {
         }
     }
 
+    func audioDeviceDisconnected(id: String) {
+        guard id == activeMicrophoneID else { return }
+        interrupt("The selected microphone disconnected.")
+    }
+
     private func finish(reason: String? = nil) async {
+        defer { activeMicrophoneID = nil }
         guard let engine else { activity = .idle; processing.releaseRecording(); return }
         activity = .finalizing
         do {
