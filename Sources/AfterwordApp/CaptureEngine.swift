@@ -81,6 +81,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private var lastEnd: [AudioSource: Int64] = [:]
     private var microphoneGapCount = 0
     private var largestMicrophoneGapUS: Int64 = 0
+    private var microphoneCoverageWindowStartUS: Int64?
+    private var microphoneCoverageSavedUS: Int64 = 0
+    private var microphoneCoverageWarning: String?
     private var intervals: [CaptureInterval] = []
     private var pending: [AudioSource: Double] = [:]
     private var accepting = true
@@ -174,6 +177,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 self.meeting.captureState = .recording
             }
             self.lastEnd = [:]
+            self.microphoneCoverageWindowStartUS = nil
+            self.microphoneCoverageSavedUS = 0
             try self.store.save(self.meeting)
         }
     }
@@ -206,7 +211,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             let gapLabel = self.microphoneGapCount == 1 ? "gap" : "gaps"
             let gapWarning = self.microphoneGapCount == 0 ? nil
                 : "Microphone audio was missing in \(self.microphoneGapCount) \(gapLabel), largest \(self.largestMicrophoneGapUS / 1_000) ms. Recording continued; speech during missing audio was not captured."
-            self.meeting.captureError = finalReason ?? gapWarning
+            let details = [finalReason, self.microphoneCoverageWarning ?? gapWarning].compactMap { $0 }
+            self.meeting.captureError = details.isEmpty ? nil : details.joined(separator: " ")
             self.meeting.processingStatus = "idle"
             try self.store.save(self.meeting)
             return self.meeting
@@ -329,6 +335,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             allowed[index].endUS = min(allowed[index].endUS ?? packet.receivedUS, packet.receivedUS)
         }
         let timeline = CaptureTimeline(intervals: allowed)
+        var savedMicrophoneUS: Int64 = 0
         for slice in timeline.intersections(bufferStartUS: packet.startUS, frameCount: packet.sample.numSamples,
                                             sampleRate: format.sampleRate, generation: packet.generation) {
             var offset = slice.offset
@@ -389,7 +396,29 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 if writer.frames >= Int64(format.sampleRate * 5) { try finishWriter(packet.source) }
             }
             lastEnd[packet.source] = sliceStartUS + Int64(Double(acceptedCount) * 1_000_000 / format.sampleRate)
+            if packet.source == .microphone {
+                savedMicrophoneUS += Int64(Double(acceptedCount) * 1_000_000 / format.sampleRate)
+            }
         }
+        if packet.source == .microphone { observeMicrophoneCoverage(at: packet.receivedUS, savedUS: savedMicrophoneUS) }
+    }
+
+    private func observeMicrophoneCoverage(at receivedUS: Int64, savedUS: Int64) {
+        if let start = microphoneCoverageWindowStartUS {
+            let elapsed = receivedUS - start
+            if elapsed >= 5_000_000 {
+                if microphoneCoverageWarning == nil && Double(microphoneCoverageSavedUS) < Double(elapsed) * 0.7 {
+                    let warning = "Microphone audio coverage fell below 70% while recording. Missing speech may not be recoverable."
+                    microphoneCoverageWarning = warning
+                    event(.warning(warning))
+                }
+                microphoneCoverageWindowStartUS = receivedUS
+                microphoneCoverageSavedUS = 0
+            }
+        } else {
+            microphoneCoverageWindowStartUS = receivedUS
+        }
+        microphoneCoverageSavedUS += savedUS
     }
 
     private static func level(_ pcm: AVAudioPCMBuffer) -> Float {
