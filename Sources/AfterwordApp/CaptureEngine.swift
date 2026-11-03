@@ -330,9 +330,10 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             throw CaptureFailure(message: "The \(packet.source.rawValue) audio format changed. Recording was interrupted.")
         }
         formats[packet.source] = format
-        var allowed = snapshotIntervals()
+        let (intervals, admissionUS) = lock.withLock { (self.intervals, self.nowUS()) }
+        var allowed = intervals
         for index in allowed.indices where allowed[index].generation == packet.generation {
-            allowed[index].endUS = min(allowed[index].endUS ?? packet.receivedUS, packet.receivedUS)
+            allowed[index].endUS = min(allowed[index].endUS ?? admissionUS, admissionUS)
         }
         let timeline = CaptureTimeline(intervals: allowed)
         var savedMicrophoneUS: Int64 = 0

@@ -13,6 +13,20 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
         func now() -> CMTime { lock.withLock { CMTime(value: value, timescale: 1_000_000) } }
     }
 
+    private final class SequenceClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private let values: [Int64]
+        private var index = 0
+        init(_ values: [Int64]) { self.values = values }
+        func now() -> CMTime {
+            lock.withLock {
+                let value = values[min(index, values.count - 1)]
+                index += 1
+                return CMTime(value: value, timescale: 1_000_000)
+            }
+        }
+    }
+
     private func temporaryStore() throws -> (URL, MeetingStore) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-capture-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -413,6 +427,30 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(chunks.count, 2)
         XCTAssertGreaterThanOrEqual(chunks[1].startUS, chunks[0].endUS - 2)
         XCTAssertEqual(chunks.map(\.frameCount), [80_000, 15_999])
+    }
+
+    func testSlightlyFutureStampedMicrophoneBufferIsSavedAfterTimeCatchesUp() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = SequenceClock([0, 1_000_000, 1_050_000])
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { _ in }
+        engine.enqueue(try sample(frames: 512), source: .microphone,
+                       hostTimestamp: CMTime(value: 1_005_000, timescale: 1_000_000))
+        try await engine.rename(to: "Timebase test")
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.captureState, .stopped)
+        XCTAssertEqual(meeting.chunks.map(\.frameCount), [512])
+    }
+
+    func testStopDoesNotCommitFutureStampedMicrophoneAudio() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let engine = try CaptureEngine(store: store) { _ in }
+        let ahead = CMTimeAdd(CMClockGetTime(CMClockGetHostTimeClock()), CMTime(value: 40_000, timescale: 1_000_000))
+        engine.enqueue(try sample(frames: 160), source: .microphone, hostTimestamp: ahead)
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.captureState, .stopped)
+        XCTAssertTrue(meeting.chunks.allSatisfy { $0.endUS <= meeting.intervals[0].endUS! })
     }
 
     func testCaptureSessionPersistsSelectedLanguageWithoutStartingHardware() async throws {
