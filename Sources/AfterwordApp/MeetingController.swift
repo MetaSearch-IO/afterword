@@ -94,19 +94,33 @@ final class MeetingController: ObservableObject {
         if rootURL == nil {
             do {
                 localControl = try LocalControlServer { [weak self] request in
-                    guard let self, let command = request["command"], let id = request["meeting_id"] else {
-                        return .rejected("Afterword is closing.")
-                    }
-                    if command == "label" {
-                        guard let segment = request["segment_id"], let speaker = request["speaker_id"] else {
-                            return .rejected("A segment and speaker are required.")
-                        }
-                        return self.labelFromCLI(id: id, segmentID: segment, speakerID: speaker)
-                    }
-                    return self.processFromCLI(id: id, summaryOnly: command == "notes")
+                    self?.handleLocalCommand(request) ?? .rejected("Afterword is closing.")
                 }
             } catch { message = "Local CLI unavailable: \(error.localizedDescription)" }
         }
+    }
+
+    func handleLocalCommand(_ request: [String: String]) -> LocalControlReply {
+        guard let command = request["command"] else { return .rejected("Unsupported local command.") }
+        if command == "record" {
+            guard canRecord else { return .rejected("Afterword is not ready to record.") }
+            record()
+            return .accepted(status: "starting", runID: nil)
+        }
+        if command == "stop" {
+            guard activity == .recording || activity == .paused else { return .rejected("No recording is active.") }
+            stop()
+            return .accepted(status: "finalizing", runID: nil)
+        }
+        guard let id = request["meeting_id"] else { return .rejected("A meeting ID is required.") }
+        if command == "label" {
+            guard let segment = request["segment_id"], let speaker = request["speaker_id"] else {
+                return .rejected("A segment and speaker are required.")
+            }
+            return labelFromCLI(id: id, segmentID: segment, speakerID: speaker)
+        }
+        guard command == "process" || command == "notes" else { return .rejected("Unsupported local command.") }
+        return processFromCLI(id: id, summaryOnly: command == "notes")
     }
 
     func processFromCLI(id: String, summaryOnly: Bool = false) -> LocalControlReply {

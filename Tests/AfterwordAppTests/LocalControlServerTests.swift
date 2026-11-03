@@ -45,11 +45,36 @@ final class LocalControlServerTests: XCTestCase {
                                                                     fields: ["segment_id": "seg-1", "speaker_id": "speaker-1"]) }.value
         let labelReply = try XCTUnwrap(JSONSerialization.jsonObject(with: label) as? [String: Any])
         XCTAssertEqual(labelReply["run_id"] as? String, "label:test-id:seg-1:speaker-1")
+        for command in ["record", "stop"] {
+            let response = try await Task.detached { try sendLocalCommand(socket: socket, command: command, meetingID: nil) }.value
+            let value = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
+            XCTAssertEqual(value["run_id"] as? String, command)
+        }
+    }
+
+    @MainActor
+    func testRecordingCommandsRespectControllerState() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-cli-record-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let controller = MeetingController(rootURL: directory, requestMicrophoneAccess: { false })
+        let deadline = Date().addingTimeInterval(3)
+        while controller.isLoading && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(controller.isLoading)
+        XCTAssertFalse(controller.handleLocalCommand(["command": "stop"]).ok)
+        let started = controller.handleLocalCommand(["command": "record"])
+        XCTAssertTrue(started.ok)
+        XCTAssertEqual(started.status, "starting")
+        XCTAssertFalse(controller.handleLocalCommand(["command": "record"]).ok)
+        while controller.activity != .idle && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(controller.handleLocalCommand(["command": "stop"]).ok)
+        XCTAssertTrue(try controller.store.list().isEmpty)
     }
 }
 
-private func sendLocalCommand(socket: URL, command: String = "process", fields: [String: String] = [:]) throws -> Data {
-    let request = fields.merging(["command": command, "meeting_id": "test-id"]) { _, required in required }
+private func sendLocalCommand(socket: URL, command: String = "process", fields: [String: String] = [:],
+                              meetingID: String? = "test-id") throws -> Data {
+    var request = fields.merging(["command": command]) { _, required in required }
+    if let meetingID { request["meeting_id"] = meetingID }
     let line = String(decoding: try JSONSerialization.data(withJSONObject: request), as: UTF8.self) + "\n"
     var address = sockaddr_un()
     address.sun_family = sa_family_t(AF_UNIX)

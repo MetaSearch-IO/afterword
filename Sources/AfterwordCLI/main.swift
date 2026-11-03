@@ -73,14 +73,14 @@ private enum AfterwordCLI {
 
     private static func run(_ arguments: [String]) throws {
         guard let command = arguments.first else {
-            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
+            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
             return
         }
         if command == "--help" || command == "help" {
-            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
+            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
             return
         }
-        guard ["list", "status", "process", "notes", "label", "watch"].contains(command) else {
+        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch"].contains(command) else {
             throw CommandError(message: "Unknown command: \(command). Run afterwordctl --help.")
         }
         let json = arguments.contains("--json")
@@ -88,9 +88,15 @@ private enum AfterwordCLI {
         if command == "label" {
             guard operands.count == 3 else { throw CommandError(message: "Usage: afterwordctl label ID SEGMENT_ID SPEAKER_ID") }
         } else {
-            guard operands.count <= (command == "list" ? 0 : 1) else {
+            guard operands.count <= (["list", "record", "stop"].contains(command) ? 0 : 1) else {
                 throw CommandError(message: "Too many arguments for \(command).")
             }
+        }
+        if command == "record" || command == "stop" {
+            let reply = try requestProcessing(id: "", command: command)
+            guard reply.ok else { throw CommandError(message: reply.error ?? "The app rejected the command.") }
+            if json { try printJSON(reply) } else { print(reply.status ?? command) }
+            return
         }
         let saved = try store.list()
         if command == "list" {
