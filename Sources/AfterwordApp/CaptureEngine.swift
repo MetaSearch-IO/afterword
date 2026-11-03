@@ -85,6 +85,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private var microphoneCoverageSavedUS: Int64 = 0
     private var microphoneCoverageWarning: String?
     private var intervals: [CaptureInterval] = []
+    private var finalizedSinceManifestFlush = 0
+    private var lastManifestFlushUS: Int64 = 0
     private var pending: [AudioSource: Double] = [:]
     private var accepting = true
     private var failureSent = false
@@ -152,6 +154,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 self.meeting.captureState = .paused
             }
             try self.store.save(self.meeting)
+            self.finalizedSinceManifestFlush = 0
+            self.lastManifestFlushUS = self.nowUS()
             try self.finishWriters()
         }
     }
@@ -159,7 +163,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     func rename(to title: String) async throws {
         try await perform {
             guard !self.finalized else { throw CaptureFailure(message: "Recording finished. Save the meeting name again.") }
+            try self.flushChunkManifest()
             self.meeting = try self.store.rename(id: self.meeting.id, title: title)
+            self.lastManifestFlushUS = self.nowUS()
         }
     }
 
@@ -180,6 +186,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             self.microphoneCoverageWindowStartUS = nil
             self.microphoneCoverageSavedUS = 0
             try self.store.save(self.meeting)
+            self.lastManifestFlushUS = self.nowUS()
         }
     }
 
@@ -199,6 +206,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             self.meeting.intervals = self.snapshotIntervals()
             self.meeting.captureState = .finalizing
             try self.store.save(self.meeting)
+            self.finalizedSinceManifestFlush = 0
+            self.lastManifestFlushUS = self.nowUS()
             do { try self.finishWriters() }
             catch {
                 self.meeting.captureState = .interrupted
@@ -435,6 +444,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     private func finishWriters() throws {
         for source in [AudioSource.microphone, .system] { try finishWriter(source) }
+        try flushChunkManifest()
     }
 
     private func finishWriter(_ source: AudioSource) throws {
@@ -444,7 +454,20 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                                          startUS: writer.startUS, frameCount: writer.frames,
                                          sampleRate: writer.format.sampleRate, channelCount: Int(writer.format.channelCount),
                                          format: "pcm", relativePath: "audio/\(writer.id)/audio.caf")
-        meeting = try store.commitChunk(meetingID: meeting.id, descriptor: descriptor)
+        try store.finalizeChunk(meeting: meeting, descriptor: descriptor)
+        meeting.chunks.append(descriptor)
         writers.removeValue(forKey: source)
+        finalizedSinceManifestFlush += 1
+        if finalizedSinceManifestFlush >= 32 || nowUS() - lastManifestFlushUS >= 5_000_000 {
+            try flushChunkManifest()
+        }
+    }
+
+    private func flushChunkManifest() throws {
+        guard finalizedSinceManifestFlush > 0 else { return }
+        meeting.chunks.sort { ($0.startUS, $0.id) < ($1.startUS, $1.id) }
+        try store.save(meeting)
+        finalizedSinceManifestFlush = 0
+        lastManifestFlushUS = nowUS()
     }
 }

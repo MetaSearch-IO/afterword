@@ -82,14 +82,20 @@ public final class MeetingStore {
         }
         meeting.chunks.append(descriptor)
         try validate(meeting)
-        let directory = try meetingURL(id: meetingID)
+        try finalizeChunk(meeting: meeting, descriptor: descriptor)
+        sortChunks(&meeting)
+        try save(meeting)
+        return meeting
+    }
+
+    // Recovery adopts finalized chunk directories that the manifest has not listed yet.
+    package func finalizeChunk(meeting: Meeting, descriptor: ChunkDescriptor) throws {
+        try validate(descriptor, meeting: meeting)
+        let directory = try meetingURL(id: meeting.id)
         let partial = try safeURL("audio/\(descriptor.id).partial", under: directory)
         try validateAudio(descriptor, directory: partial)
         try encoder.encode(descriptor).write(to: safeURL("chunk.json", under: partial), options: .atomic)
         try files.moveItem(at: partial, to: safeURL("audio/\(descriptor.id)", under: directory))
-        sortChunks(&meeting)
-        try save(meeting)
-        return meeting
     }
 
     public func recover() throws -> [Meeting] {

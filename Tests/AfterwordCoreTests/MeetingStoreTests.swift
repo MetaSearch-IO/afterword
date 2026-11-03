@@ -11,7 +11,8 @@ struct MeetingStoreTests {
         try body(MeetingStore(rootURL: url), url)
     }
 
-    private func record(_ store: MeetingStore, meeting: Meeting, id: String = "chunk-1", count: Int64 = 480) throws -> ChunkDescriptor {
+    private func record(_ store: MeetingStore, meeting: Meeting, id: String = "chunk-1", count: Int64 = 480,
+                        startUS: Int64 = 0) throws -> ChunkDescriptor {
         let directory = try store.beginChunk(meetingID: meeting.id, chunkID: id)
         let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count))!
@@ -21,7 +22,7 @@ struct MeetingStoreTests {
             let file = try AVAudioFile(forWriting: directory.appendingPathComponent("audio.caf"), settings: format.settings)
             try file.write(from: buffer)
         }
-        return ChunkDescriptor(id: id, source: .microphone, generation: 0, startUS: 0,
+        return ChunkDescriptor(id: id, source: .microphone, generation: 0, startUS: startUS,
                                frameCount: count, sampleRate: 48_000, channelCount: 1,
                                relativePath: "audio/\(id)/audio.caf")
     }
@@ -40,6 +41,26 @@ struct MeetingStoreTests {
             #expect(recovered.captureState == .interrupted)
             #expect(recovered.intervals[0].endUS == 10_000)
             #expect(try store.recover() == [recovered])
+            #expect(store.recoveryIssues.isEmpty)
+        }
+    }
+
+    @Test func finalizedAudioSurvivesCrashBeforeManifestFlush() throws {
+        try fixture { store, _ in
+            var meeting = try store.create(title: "Recovery before flush")
+            meeting.captureState = .recording
+            meeting.intervals = [CaptureInterval(generation: 0, startUS: 0)]
+            try store.save(meeting)
+            let first = try record(store, meeting: meeting)
+            let second = try record(store, meeting: meeting, id: "chunk-2", startUS: 20_000)
+            try store.finalizeChunk(meeting: meeting, descriptor: first)
+            try store.finalizeChunk(meeting: meeting, descriptor: second)
+            #expect(try store.load(id: meeting.id).chunks.isEmpty)
+            let recovered = try #require(store.recover().first)
+            #expect(recovered.chunks == [first, second])
+            #expect(recovered.retainedDurationUS == 20_000)
+            #expect(recovered.captureState == .interrupted)
+            #expect(recovered.intervals[0].endUS == 30_000)
             #expect(store.recoveryIssues.isEmpty)
         }
     }

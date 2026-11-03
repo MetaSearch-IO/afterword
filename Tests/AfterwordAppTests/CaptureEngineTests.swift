@@ -344,6 +344,118 @@ final class CaptureEngineTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(prepared.sources.first?.pieces.map(\.meeting_start_us), [0, 1_500_000])
     }
 
+    func testShortGapBurstFinalizesFilesBeforeManifestFlushAndPreservesFrames() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let levels = expectation(description: "All burst buffers written")
+        levels.expectedFulfillmentCount = 12
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { event in
+            if case .level(.microphone, _) = event { levels.fulfill() }
+        }
+        let pcm = try sample(frames: 1_600)
+        for index in 0..<12 {
+            let startUS = Int64(index) * 100_500
+            clock.set(startUS + 100_000)
+            engine.enqueue(pcm, source: .microphone,
+                           hostTimestamp: CMTime(value: startUS, timescale: 1_000_000))
+        }
+        await fulfillment(of: [levels], timeout: 3)
+        XCTAssertEqual(try store.load(id: engine.meetingID).chunks.count, 0)
+        let audio = try store.artifactURL(meetingID: engine.meetingID, relativePath: "audio")
+        let finalized = try FileManager.default.contentsOfDirectory(atPath: audio.path)
+            .filter { !$0.hasSuffix(".partial") }
+        XCTAssertEqual(finalized.count, 11)
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.chunks.count, 12)
+        XCTAssertEqual(meeting.chunks.map(\.startUS).sorted(), (0..<12).map { Int64($0) * 100_500 })
+        XCTAssertEqual(meeting.chunks.reduce(0) { $0 + $1.frameCount }, 12 * 1_600)
+        XCTAssertEqual(meeting.retainedDurationUS, 1_200_000)
+    }
+
+    func testShortGapBurstCheckpointsManifestBeforeStop() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let levels = expectation(description: "Burst buffers written")
+        levels.expectedFulfillmentCount = 320
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { event in
+            if case .level(.microphone, _) = event { levels.fulfill() }
+        }
+        let pcm = try sample(frames: 160)
+        for index in 0..<320 {
+            let startUS = Int64(index) * 20_000
+            clock.set(startUS + 10_000)
+            engine.enqueue(pcm, source: .microphone,
+                           hostTimestamp: CMTime(value: startUS, timescale: 1_000_000))
+        }
+        await fulfillment(of: [levels], timeout: 10)
+        let saved = try store.load(id: engine.meetingID)
+        XCTAssertGreaterThan(saved.chunks.count, 0)
+        XCTAssertLessThan(saved.chunks.count, 319)
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.chunks.count, 320)
+        XCTAssertEqual(meeting.chunks.reduce(0) { $0 + $1.frameCount }, 320 * 160)
+        XCTAssertEqual(meeting.retainedDurationUS, 3_200_000)
+    }
+
+    func testSparseChunksCheckpointManifestAfterFiveSeconds() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let levels = expectation(description: "Sparse buffers written")
+        levels.expectedFulfillmentCount = 3
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { event in
+            if case .level(.microphone, _) = event { levels.fulfill() }
+        }
+        let pcm = try sample(frames: 1_600)
+        for startUS in [Int64(0), 100_500] {
+            clock.set(startUS + 100_000)
+            engine.enqueue(pcm, source: .microphone,
+                           hostTimestamp: CMTime(value: startUS, timescale: 1_000_000))
+        }
+        try await engine.rename(to: "Before gap")
+        clock.set(6_100_000)
+        engine.enqueue(pcm, source: .microphone,
+                       hostTimestamp: CMTime(value: 6_000_000, timescale: 1_000_000))
+        await fulfillment(of: [levels], timeout: 3)
+        XCTAssertEqual(try store.load(id: engine.meetingID).chunks.count, 2)
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.chunks.map(\.startUS).sorted(), [0, 100_500, 6_000_000])
+        XCTAssertEqual(meeting.retainedDurationUS, 300_000)
+    }
+
+    func testBufferedChunksFlushBeforeRenamePauseAndStop() async throws {
+        let (directory, store) = try temporaryStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let clock = Clock()
+        let engine = try CaptureEngine(store: store, hostTime: clock.now) { _ in }
+        let pcm = try sample(frames: 1_600)
+        for index in 0..<3 {
+            let startUS = Int64(index) * 100_500
+            clock.set(startUS + 100_000)
+            engine.enqueue(pcm, source: .microphone,
+                           hostTimestamp: CMTime(value: startUS, timescale: 1_000_000))
+        }
+        try await engine.rename(to: "Updated")
+        let renamed = try store.load(id: engine.meetingID)
+        XCTAssertEqual(renamed.title, "Updated")
+        XCTAssertEqual(renamed.chunks.count, 2)
+        try await engine.pause()
+        let paused = try store.load(id: engine.meetingID)
+        XCTAssertEqual(paused.captureState, .paused)
+        XCTAssertEqual(paused.chunks.count, 3)
+        clock.set(10_000_000)
+        try await engine.resume()
+        clock.set(10_100_000)
+        engine.enqueue(pcm, source: .microphone, hostTimestamp: CMTime(value: 10, timescale: 1))
+        let meeting = try await engine.stop()
+        XCTAssertEqual(meeting.title, "Updated")
+        XCTAssertEqual(meeting.chunks.count, 4)
+        XCTAssertEqual(meeting.chunks.map(\.startUS).sorted(), [0, 100_500, 201_000, 10_000_000])
+        XCTAssertEqual(meeting.chunks.reduce(0) { $0 + $1.frameCount }, 4 * 1_600)
+    }
+
     func testSustainedShortMicrophoneGapsWarnWithoutPaddingMissingAudio() async throws {
         let (directory, store) = try temporaryStore()
         defer { try? FileManager.default.removeItem(at: directory) }
