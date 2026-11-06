@@ -384,7 +384,7 @@ struct NewRecordingSetupView: View {
                 .disabled(controller.activity == .starting)
             CalendarRecordingPicker(calendar: calendar, canChoose: controller.activity == .idle)
                 .disabled(controller.activity == .starting)
-            Text("Starting requests microphone and screen/system-audio access. Wear headphones to keep microphone and system audio separate.")
+            Text("Starting requests microphone and screen/system-audio access. Afterword uses the built-in microphone when available to avoid Bluetooth disconnections. Wear headphones to keep microphone and system audio separate.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(remoteEnabled

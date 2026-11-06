@@ -2,10 +2,20 @@ import AppKit
 import AVFoundation
 import AfterwordCore
 import Combine
+import CoreAudio
 import ScreenCaptureKit
 
 @MainActor
 final class MeetingController: ObservableObject {
+    struct MicrophoneCandidate {
+        let id: String
+        let isBuiltIn: Bool
+    }
+
+    static func preferredMicrophoneID(_ candidates: [MicrophoneCandidate], defaultID: String?) -> String? {
+        candidates.first(where: \.isBuiltIn)?.id ?? defaultID
+    }
+
     enum Activity: String {
         case idle = "Ready to record", starting = "Starting", recording = "Recording", pausing = "Pausing"
         case paused = "Paused", resuming = "Resuming", finalizing = "Finalizing"
@@ -103,6 +113,11 @@ final class MeetingController: ObservableObject {
     func handleLocalCommand(_ request: [String: String]) -> LocalControlReply {
         guard let command = request["command"] else { return .rejected("Unsupported local command.") }
         if command == "record" {
+            if isLoading { return .rejected(message ?? "Afterword is checking saved meetings.") }
+            if activity != .idle { return .rejected("Afterword is \(activity.rawValue.lowercased()).") }
+            if !processing.canReserveRecording {
+                return .rejected(processing.message ?? "Afterword is waiting for processing cleanup.")
+            }
             guard canRecord else { return .rejected("Afterword is not ready to record.") }
             record()
             return .accepted(status: "starting", runID: nil)
@@ -242,10 +257,16 @@ final class MeetingController: ObservableObject {
                     throw RecordingPermissionIssue.microphone
                 }
                 guard !quitting, pendingInterruption == nil else { throw CancellationError() }
-                guard let device = AVCaptureDevice.default(for: .audio) else {
+                let devices = AVCaptureDevice.DiscoverySession(deviceTypes: [.microphone],
+                    mediaType: .audio, position: .unspecified).devices.map {
+                    MicrophoneCandidate(id: $0.uniqueID,
+                        isBuiltIn: $0.transportType == Int32(kAudioDeviceTransportTypeBuiltIn))
+                }
+                guard let microphoneID = Self.preferredMicrophoneID(devices,
+                    defaultID: AVCaptureDevice.default(for: .audio)?.uniqueID) else {
                     throw CaptureFailure(message: "No microphone is available. Connect one before recording.")
                 }
-                activeMicrophoneID = device.uniqueID
+                activeMicrophoneID = microphoneID
                 let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
                 guard !quitting, pendingInterruption == nil else { throw CancellationError() }
                 guard let display = content.displays.first else {
@@ -260,7 +281,7 @@ final class MeetingController: ObservableObject {
                 }
                 engine = capture
                 selectedID = capture.meetingID
-                try await capture.start(display: display, microphoneID: device.uniqueID)
+                try await capture.start(display: display, microphoneID: microphoneID)
                 calendar.recordingStarted(meetingID: capture.meetingID, selection: calendarSelection)
                 receivedSources = []
                 activity = .recording

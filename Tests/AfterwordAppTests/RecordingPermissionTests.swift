@@ -6,6 +6,17 @@ import XCTest
 
 final class RecordingPermissionTests: XCTestCase {
     @MainActor
+    func testBuiltInMicrophoneWinsOverBluetoothDefault() {
+        let candidates = [
+            MeetingController.MicrophoneCandidate(id: "bluetooth", isBuiltIn: false),
+            MeetingController.MicrophoneCandidate(id: "macbook", isBuiltIn: true)
+        ]
+        XCTAssertEqual(MeetingController.preferredMicrophoneID(candidates, defaultID: "bluetooth"), "macbook")
+        XCTAssertEqual(MeetingController.preferredMicrophoneID(candidates, defaultID: nil), "macbook")
+        XCTAssertEqual(MeetingController.preferredMicrophoneID([candidates[0]], defaultID: "bluetooth"), "bluetooth")
+    }
+
+    @MainActor
     func testOnlySelectedMicrophoneDisconnectInterruptsRecording() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-device-disconnect-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
