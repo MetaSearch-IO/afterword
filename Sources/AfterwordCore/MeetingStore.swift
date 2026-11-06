@@ -127,6 +127,7 @@ public final class MeetingStore {
                 }
                 let audioURL = try safeURL("audio", under: directory)
                 var validChunkIDs = Set<String>()
+                let manifestChunks = Dictionary(uniqueKeysWithValues: meeting.chunks.map { ($0.id, $0) })
                 for chunkURL in try files.contentsOfDirectory(at: audioURL, includingPropertiesForKeys: nil) {
                     if chunkURL.lastPathComponent.hasSuffix(".partial") { continue }
                     do {
@@ -135,7 +136,7 @@ public final class MeetingStore {
                         guard chunk.id == chunkURL.lastPathComponent else { throw StoreError.invalid("Chunk ID does not match directory.") }
                         try validate(chunk, meeting: meeting)
                         try validateAudio(chunk, directory: checkedURL)
-                        if let existing = meeting.chunks.first(where: { $0.id == chunk.id }) {
+                        if let existing = manifestChunks[chunk.id] {
                             guard existing == chunk else { throw StoreError.invalid("Chunk descriptor differs from manifest.") }
                         } else {
                             var candidate = meeting
