@@ -6,6 +6,9 @@ cd "$project_root"
 
 app_path="${1:-$project_root/.build/Afterword.app}"
 signing_identity_file="$project_root/.build/afterword-signing-identity"
+if [[ ! -f "$signing_identity_file" ]]; then
+    signing_identity_file="$(dirname "$(git rev-parse --git-common-dir)")/.build/afterword-signing-identity"
+fi
 if [[ ${AFTERWORD_SIGNING_IDENTITY+x} ]]; then
     afterword_signing_identity="$AFTERWORD_SIGNING_IDENTITY"
 elif [[ -f "$signing_identity_file" ]]; then
