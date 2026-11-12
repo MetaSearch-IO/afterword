@@ -37,7 +37,7 @@ public final class MeetingStore {
 
     public func load(id: String) throws -> Meeting {
         let url = try meetingURL(id: id)
-        let meeting: Meeting = try decode(at: safeURL("meeting.json", under: url))
+        let meeting: Meeting = try decode(at: safeURL("meeting.json", under: url), maximumBytes: 128 * 1_024 * 1_024)
         guard meeting.id == id else { throw StoreError.invalid("Meeting ID does not match its directory.") }
         try validate(meeting)
         return meeting
@@ -126,9 +126,16 @@ public final class MeetingStore {
                     continue
                 }
                 let audioURL = try safeURL("audio", under: directory)
+                let chunkURLs = try files.contentsOfDirectory(at: audioURL, includingPropertiesForKeys: nil)
+                if !meeting.captureState.isActive, meeting.intervals.allSatisfy({ $0.endUS != nil }),
+                   !["running", "processing", "cancelling"].contains(meeting.processingStatus),
+                   Set(chunkURLs.map(\.lastPathComponent)) == Set(meeting.chunks.map(\.id)) {
+                    meetings.append(meeting)
+                    continue
+                }
                 var validChunkIDs = Set<String>()
                 let manifestChunks = Dictionary(uniqueKeysWithValues: meeting.chunks.map { ($0.id, $0) })
-                for chunkURL in try files.contentsOfDirectory(at: audioURL, includingPropertiesForKeys: nil) {
+                for chunkURL in chunkURLs {
                     if chunkURL.lastPathComponent.hasSuffix(".partial") { continue }
                     do {
                         let checkedURL = try safeURL("audio/\(chunkURL.lastPathComponent)", under: directory)
@@ -215,9 +222,9 @@ public final class MeetingStore {
         return result
     }
 
-    private func decode<T: Decodable>(at url: URL) throws -> T {
+    private func decode<T: Decodable>(at url: URL, maximumBytes: Int = 16 * 1_024 * 1_024) throws -> T {
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard size <= 16 * 1_024 * 1_024 else { throw StoreError.invalid("Metadata exceeds size limit.") }
+        guard size <= maximumBytes else { throw StoreError.invalid("Metadata exceeds size limit.") }
         let data = try Data(contentsOf: url)
         let version = try JSONDecoder().decode(SchemaHeader.self, from: data).schemaVersion
         guard version == 1 else {

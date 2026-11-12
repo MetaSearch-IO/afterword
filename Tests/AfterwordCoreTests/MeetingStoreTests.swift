@@ -4,6 +4,26 @@ import Testing
 @testable import AfterwordCore
 
 struct MeetingStoreTests {
+    @Test func longRecordingMetadataRemainsVisible() throws {
+        try fixture { store, _ in
+            var meeting = try store.create(title: "Long recording")
+            meeting.captureState = .stopped
+            meeting.intervals = [CaptureInterval(generation: 0, startUS: 0, endUS: 7_000_000_000)]
+            meeting.chunks = (0..<70_000).map { index in
+                let id = "chunk-\(index)"
+                return ChunkDescriptor(id: id, source: .microphone, generation: 0,
+                    startUS: Int64(index) * 100_000, frameCount: 4_800,
+                    sampleRate: 48_000, channelCount: 1,
+                    relativePath: "audio/\(id)/audio.caf")
+            }
+            try store.save(meeting)
+            let metadata = try store.artifactURL(meetingID: meeting.id, relativePath: "meeting.json")
+            #expect(try Data(contentsOf: metadata).count > 16 * 1_024 * 1_024)
+            #expect(try store.load(id: meeting.id).chunks.count == 70_000)
+            #expect(try store.list().map(\.id) == [meeting.id])
+        }
+    }
+
     private func fixture(_ body: (MeetingStore, URL) throws -> Void) throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-core-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
@@ -254,7 +274,8 @@ struct MeetingStoreTests {
     @Test func missingChunkDoesNotHideRemainingMeetingAudio() throws {
         try fixture { store, _ in
             var meeting = try store.create(title: "Missing")
-            meeting.intervals = [CaptureInterval(generation: 0, startUS: 0)]
+            meeting.captureState = .stopped
+            meeting.intervals = [CaptureInterval(generation: 0, startUS: 0, endUS: 10_000)]
             try store.save(meeting)
             let retained = try record(store, meeting: meeting)
             meeting = try store.commitChunk(meetingID: meeting.id, descriptor: retained)

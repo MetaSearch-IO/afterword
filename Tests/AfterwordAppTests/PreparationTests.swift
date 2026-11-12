@@ -72,4 +72,23 @@ final class PreparationTests: XCTestCase, @unchecked Sendable {
         do { _ = try await task.value; XCTFail("Expected cancellation") }
         catch is CancellationError { }
     }
+
+    func testFinalizedRecoveryDefersMissingAudioFailureToPreparation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-finalized-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = MeetingStore(rootURL: directory)
+        var meeting = try store.create(title: "Finalized")
+        meeting.captureState = .stopped
+        meeting.intervals = [CaptureInterval(generation: 0, startUS: 0, endUS: 1_000_000)]
+        try store.save(meeting)
+        try record(store, meetingID: meeting.id, source: .microphone, start: 0,
+                   rate: 48_000, channels: 1, generation: 0, frames: 48_000)
+        meeting = try store.load(id: meeting.id)
+        let audio = try store.artifactURL(meetingID: meeting.id, relativePath: meeting.chunks[0].relativePath)
+        try FileManager.default.removeItem(at: audio)
+        let recovered = try XCTUnwrap(store.recover().first)
+        XCTAssertEqual(recovered.captureState, .stopped)
+        XCTAssertThrowsError(try AudioPreparation.prepare(meeting: recovered, rootURL: directory, runID: "missing-audio"))
+    }
 }

@@ -180,6 +180,12 @@ final class MeetingController: ObservableObject {
         isLoading = true
         let root = store.rootURL
         Task {
+            if let initial = try? await Task.detached(priority: .userInitiated, operation: {
+                try MeetingStore(rootURL: root).list()
+            }).value {
+                meetings = initial
+                if !meetings.contains(where: { $0.id == selectedID }) { selectedID = meetings.first?.id }
+            }
             do {
                 let result = try await Task.detached(priority: .userInitiated) {
                     let recoveryStore = MeetingStore(rootURL: root)
@@ -208,7 +214,7 @@ final class MeetingController: ObservableObject {
                     return (meetings, issues, busy)
                 }.value
                 meetings = result.0
-                selectedID = meetings.first?.id
+                if !meetings.contains(where: { $0.id == selectedID }) { selectedID = meetings.first?.id }
                 recoveryBlocked = !result.2.isEmpty
                 message = recoveryBlocked ? "A previous processing job is still exiting. Recording and processing remain blocked until cleanup is confirmed." : nil
                 if !result.1.isEmpty { message = [message, result.1.joined(separator: "\n")].compactMap { $0 }.joined(separator: "\n") }
