@@ -49,6 +49,8 @@ private struct CommandReply: Codable {
 
 @main
 private enum AfterwordCLI {
+    private static let usage = "Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest] | trim ID START_SECONDS END_SECONDS | import FILE"
+
     static func main() {
         do { try run(Array(CommandLine.arguments.dropFirst())) }
         catch {
@@ -73,20 +75,24 @@ private enum AfterwordCLI {
 
     private static func run(_ arguments: [String]) throws {
         guard let command = arguments.first else {
-            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
+            print(usage)
             return
         }
         if command == "--help" || command == "help" {
-            print("Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest]")
+            print(usage)
             return
         }
-        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch"].contains(command) else {
+        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch", "trim", "import"].contains(command) else {
             throw CommandError(message: "Unknown command: \(command). Run afterwordctl --help.")
         }
         let json = arguments.contains("--json")
         let operands = arguments.dropFirst().filter { $0 != "--json" }
         if command == "label" {
             guard operands.count == 3 else { throw CommandError(message: "Usage: afterwordctl label ID SEGMENT_ID SPEAKER_ID") }
+        } else if command == "trim" {
+            guard operands.count == 3 else { throw CommandError(message: "Usage: afterwordctl trim ID START_SECONDS END_SECONDS") }
+        } else if command == "import" {
+            guard operands.count == 1 else { throw CommandError(message: "Usage: afterwordctl import FILE") }
         } else {
             guard operands.count <= (["list", "record", "stop"].contains(command) ? 0 : 1) else {
                 throw CommandError(message: "Too many arguments for \(command).")
@@ -96,6 +102,24 @@ private enum AfterwordCLI {
             let reply = try requestProcessing(id: "", command: command)
             guard reply.ok else { throw CommandError(message: reply.error ?? "The app rejected the command.") }
             if json { try printJSON(reply) } else { print(reply.status ?? command) }
+            return
+        }
+        if command == "trim" {
+            guard let start = Int64(operands[operands.index(operands.startIndex, offsetBy: 1)]),
+                  let end = Int64(operands[operands.index(operands.startIndex, offsetBy: 2)]),
+                  start >= 0, end > start, end <= Int64.max / 1_000_000 else {
+                throw CommandError(message: "Trim times must be increasing whole seconds.")
+            }
+            let meeting = try AudioTrim.create(from: operands[operands.startIndex], in: store,
+                startUS: start * 1_000_000, endUS: end * 1_000_000)
+            notifyAppOfNewMeeting(id: meeting.id)
+            if json { try printJSON(MeetingStatus(meeting)) } else { print(meeting.id) }
+            return
+        }
+        if command == "import" {
+            let meeting = try AudioImport.importFile(at: URL(fileURLWithPath: operands[operands.startIndex]), into: store)
+            notifyAppOfNewMeeting(id: meeting.id)
+            if json { try printJSON(MeetingStatus(meeting)) } else { print(meeting.id) }
             return
         }
         let saved = try store.list()
@@ -167,6 +191,14 @@ private enum AfterwordCLI {
         print("processing: \(status.processingStatus)\(status.processingStage.map { " / \($0)" } ?? "")")
         if let error = status.processingError { print("error: \(error)") }
         print("transcript: \(status.hasTranscript ? "ready" : "none")  notes: \(status.hasNotes ? "ready" : "none")")
+    }
+
+    private static func notifyAppOfNewMeeting(id: String) {
+        guard ProcessInfo.processInfo.environment["AFTERWORD_MEETINGS_ROOT"] == nil else { return }
+        do {
+            let reply = try requestProcessing(id: id, command: "reload")
+            if !reply.ok { fputs("afterwordctl: Meeting saved; app refresh failed: \(reply.error ?? "unknown error")\n", stderr) }
+        } catch { fputs("afterwordctl: Meeting saved; app refresh failed: \(error.localizedDescription)\n", stderr) }
     }
 
     private static func printJSON<T: Encodable>(_ value: T) throws {

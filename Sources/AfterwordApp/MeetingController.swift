@@ -127,6 +127,14 @@ final class MeetingController: ObservableObject {
             stop()
             return .accepted(status: "finalizing", runID: nil)
         }
+        if command == "reload" {
+            guard let id = request["meeting_id"] else { return .rejected("A meeting ID is required.") }
+            reload()
+            guard meetings.contains(where: { $0.id == id }) else {
+                return .rejected(message ?? "The saved meeting did not appear in the list.")
+            }
+            return .accepted(status: "loaded", runID: nil)
+        }
         guard let id = request["meeting_id"] else { return .rejected("A meeting ID is required.") }
         if command == "label" {
             guard let segment = request["segment_id"], let speaker = request["speaker_id"] else {

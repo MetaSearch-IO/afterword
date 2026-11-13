@@ -16,6 +16,10 @@ final class LocalControlServerTests: XCTestCase {
         var meeting = try controller.store.create(title: "Saved audio")
         meeting.captureState = .stopped
         try controller.store.save(meeting)
+        XCTAssertFalse(controller.meetings.contains { $0.id == meeting.id })
+        XCTAssertTrue(controller.handleLocalCommand(["command": "reload", "meeting_id": meeting.id]).ok)
+        XCTAssertTrue(controller.meetings.contains { $0.id == meeting.id })
+        XCTAssertFalse(controller.handleLocalCommand(["command": "reload", "meeting_id": "missing"]).ok)
         let reply = controller.processFromCLI(id: meeting.id)
         XCTAssertTrue(reply.ok, reply.error ?? "")
         XCTAssertNotNil(reply.runID)
@@ -50,6 +54,12 @@ final class LocalControlServerTests: XCTestCase {
             let value = try XCTUnwrap(JSONSerialization.jsonObject(with: response) as? [String: Any])
             XCTAssertEqual(value["run_id"] as? String, command)
         }
+        let reload = try await Task.detached { try sendLocalCommand(socket: socket, command: "reload") }.value
+        let reloadReply = try XCTUnwrap(JSONSerialization.jsonObject(with: reload) as? [String: Any])
+        XCTAssertEqual(reloadReply["run_id"] as? String, "reload:test-id")
+        let invalidReload = try await Task.detached { try sendLocalCommand(socket: socket, command: "reload", meetingID: nil) }.value
+        let invalidReply = try XCTUnwrap(JSONSerialization.jsonObject(with: invalidReload) as? [String: Any])
+        XCTAssertEqual(invalidReply["ok"] as? Bool, false)
     }
 
     @MainActor
