@@ -49,7 +49,7 @@ private struct CommandReply: Codable {
 
 @main
 private enum AfterwordCLI {
-    private static let usage = "Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest] | trim ID START_SECONDS END_SECONDS | import FILE"
+    private static let usage = "Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest] | trim ID START_SECONDS END_SECONDS | import FILE | storage [--json] | delete-audio ID --yes [--erase-untranscribed]"
 
     static func main() {
         do { try run(Array(CommandLine.arguments.dropFirst())) }
@@ -82,17 +82,29 @@ private enum AfterwordCLI {
             print(usage)
             return
         }
-        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch", "trim", "import"].contains(command) else {
+        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch", "trim", "import", "storage", "delete-audio"].contains(command) else {
             throw CommandError(message: "Unknown command: \(command). Run afterwordctl --help.")
         }
         let json = arguments.contains("--json")
-        let operands = arguments.dropFirst().filter { $0 != "--json" }
+        let confirmed = arguments.contains("--yes")
+        let eraseUntranscribed = arguments.contains("--erase-untranscribed")
+        let operands = arguments.dropFirst().filter { $0 != "--json" && $0 != "--yes" && $0 != "--erase-untranscribed" }
+        if confirmed && command != "delete-audio" { throw CommandError(message: "--yes is only valid with delete-audio.") }
+        if eraseUntranscribed && command != "delete-audio" {
+            throw CommandError(message: "--erase-untranscribed is only valid with delete-audio.")
+        }
         if command == "label" {
             guard operands.count == 3 else { throw CommandError(message: "Usage: afterwordctl label ID SEGMENT_ID SPEAKER_ID") }
         } else if command == "trim" {
             guard operands.count == 3 else { throw CommandError(message: "Usage: afterwordctl trim ID START_SECONDS END_SECONDS") }
         } else if command == "import" {
             guard operands.count == 1 else { throw CommandError(message: "Usage: afterwordctl import FILE") }
+        } else if command == "delete-audio" {
+            guard operands.count == 1, confirmed else {
+                throw CommandError(message: "Permanently removes saved audio and prepared WAVs while retaining results. Usage: afterwordctl delete-audio ID --yes")
+            }
+        } else if command == "storage" {
+            guard operands.isEmpty else { throw CommandError(message: "Usage: afterwordctl storage [--json]") }
         } else {
             guard operands.count <= (["list", "record", "stop"].contains(command) ? 0 : 1) else {
                 throw CommandError(message: "Too many arguments for \(command).")
@@ -120,6 +132,43 @@ private enum AfterwordCLI {
             let meeting = try AudioImport.importFile(at: URL(fileURLWithPath: operands[operands.startIndex]), into: store)
             notifyAppOfNewMeeting(id: meeting.id)
             if json { try printJSON(MeetingStatus(meeting)) } else { print(meeting.id) }
+            return
+        }
+        if command == "delete-audio" {
+            guard ProcessInfo.processInfo.environment["AFTERWORD_MEETINGS_ROOT"] == nil else {
+                throw CommandError(message: "Audio deletion requires the installed Afterword library; unset AFTERWORD_MEETINGS_ROOT.")
+            }
+            let id = operands[operands.startIndex]
+            let before = try store.load(id: id)
+            if before.audioRemovedAt != nil {
+                if json { try printJSON(CommandReply(ok: true, status: "audio-removed", runID: nil, error: nil)) }
+                else { print("audio-removed  \(id)") }
+                return
+            }
+            guard before.activeRevisionID != nil || eraseUntranscribed else {
+                throw CommandError(message: "This meeting has no transcript. Add --erase-untranscribed to permanently remove its only processable audio.")
+            }
+            let reply: CommandReply
+            do { reply = try requestProcessing(id: id, command: command) }
+            catch {
+                guard (try? store.load(id: id).audioRemovedAt) != nil else { throw error }
+                reply = CommandReply(ok: true, status: "audio-removed", runID: nil, error: nil)
+            }
+            guard reply.ok else { throw CommandError(message: reply.error ?? "Afterword rejected audio removal.") }
+            let after = try store.load(id: id)
+            guard after.audioRemovedAt != nil else { throw CommandError(message: "Audio removal was not confirmed.") }
+            if json { try printJSON(reply) } else { print("audio-removed  \(id)") }
+            return
+        }
+        if command == "storage" {
+            let usages = try StorageReport.collect(store: store)
+                .sorted { $0.deleteAudioReclaimableBytes > $1.deleteAudioReclaimableBytes }
+            if json { try printJSON(usages) }
+            else {
+                for usage in usages {
+                    print("\(usage.deleteAudioReclaimableBytes) reclaimable bytes  \(usage.processingStatus)  \(usage.title)  \(usage.id)")
+                }
+            }
             return
         }
         let saved = try store.list()
@@ -241,7 +290,7 @@ private enum AfterwordCLI {
 
     private static func sendProcessing(id: String, command: String, fields: [String: String], descriptor: Int32) throws -> CommandReply {
         defer { close(descriptor) }
-        var timeout = timeval(tv_sec: 20, tv_usec: 0)
+        var timeout = timeval(tv_sec: command == "delete-audio" ? 900 : 20, tv_usec: 0)
         _ = withUnsafePointer(to: &timeout) {
             setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, $0, socklen_t(MemoryLayout<timeval>.size))
         }

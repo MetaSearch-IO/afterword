@@ -57,6 +57,9 @@ final class LocalControlServerTests: XCTestCase {
         let reload = try await Task.detached { try sendLocalCommand(socket: socket, command: "reload") }.value
         let reloadReply = try XCTUnwrap(JSONSerialization.jsonObject(with: reload) as? [String: Any])
         XCTAssertEqual(reloadReply["run_id"] as? String, "reload:test-id")
+        let removal = try await Task.detached { try sendLocalCommand(socket: socket, command: "delete-audio") }.value
+        let removalReply = try XCTUnwrap(JSONSerialization.jsonObject(with: removal) as? [String: Any])
+        XCTAssertEqual(removalReply["run_id"] as? String, "delete-audio:test-id")
         let invalidReload = try await Task.detached { try sendLocalCommand(socket: socket, command: "reload", meetingID: nil) }.value
         let invalidReply = try XCTUnwrap(JSONSerialization.jsonObject(with: invalidReload) as? [String: Any])
         XCTAssertEqual(invalidReply["ok"] as? Bool, false)
@@ -78,6 +81,29 @@ final class LocalControlServerTests: XCTestCase {
         while controller.activity != .idle && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(controller.handleLocalCommand(["command": "stop"]).ok)
         XCTAssertTrue(try controller.store.list().isEmpty)
+    }
+
+    @MainActor
+    func testDeleteAudioCommandFinishesPendingRemoval() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("afterword-cli-delete-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let controller = MeetingController(rootURL: directory.appendingPathComponent("meetings"))
+        let deadline = Date().addingTimeInterval(3)
+        while controller.isLoading && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(controller.isLoading)
+        var meeting = try controller.store.create(title: "Pending audio removal")
+        meeting.captureState = .recording
+        meeting.audioRemovalStartedAt = ISO8601DateFormatter().string(from: Date())
+        try controller.store.save(meeting)
+        let rejected = await controller.deleteAudioFromCLI(id: meeting.id)
+        XCTAssertFalse(rejected.ok)
+        XCTAssertNil(try controller.store.load(id: meeting.id).audioRemovedAt)
+        meeting.captureState = .stopped
+        try controller.store.save(meeting)
+        let reply = await controller.deleteAudioFromCLI(id: meeting.id)
+        XCTAssertTrue(reply.ok, reply.error ?? "")
+        XCTAssertEqual(reply.status, "audio-removed")
+        XCTAssertNotNil(try controller.store.load(id: meeting.id).audioRemovedAt)
     }
 }
 

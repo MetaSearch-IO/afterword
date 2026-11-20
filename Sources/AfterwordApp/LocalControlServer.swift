@@ -19,7 +19,7 @@ struct LocalControlReply: Encodable, Sendable {
 final class LocalControlServer: @unchecked Sendable {
     private let descriptor: Int32
     private let path: String
-    private let process: @MainActor @Sendable ([String: String]) -> LocalControlReply
+    private let process: @MainActor @Sendable ([String: String]) async -> LocalControlReply
 
     static var defaultSocketURL: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -27,7 +27,7 @@ final class LocalControlServer: @unchecked Sendable {
     }
 
     init(socketURL: URL = defaultSocketURL,
-         process: @escaping @MainActor @Sendable ([String: String]) -> LocalControlReply) throws {
+         process: @escaping @MainActor @Sendable ([String: String]) async -> LocalControlReply) throws {
         let directory = socketURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
@@ -121,7 +121,7 @@ final class LocalControlServer: @unchecked Sendable {
         let reply: LocalControlReply
         if let request = try? JSONSerialization.jsonObject(with: input) as? [String: String],
            let command = request["command"],
-           ["record", "stop"].contains(command) || (["process", "notes", "label", "reload"].contains(command) && request["meeting_id"] != nil) {
+           ["record", "stop"].contains(command) || (["process", "notes", "label", "reload", "delete-audio"].contains(command) && request["meeting_id"] != nil) {
             reply = await process(request)
         } else {
             reply = .rejected("Unsupported local command.")

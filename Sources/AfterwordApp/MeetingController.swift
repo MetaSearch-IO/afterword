@@ -104,7 +104,12 @@ final class MeetingController: ObservableObject {
         if rootURL == nil {
             do {
                 localControl = try LocalControlServer { [weak self] request in
-                    self?.handleLocalCommand(request) ?? .rejected("Afterword is closing.")
+                    guard let self else { return .rejected("Afterword is closing.") }
+                    if request["command"] == "delete-audio" {
+                        guard let id = request["meeting_id"] else { return .rejected("A meeting ID is required.") }
+                        return await self.deleteAudioFromCLI(id: id)
+                    }
+                    return self.handleLocalCommand(request)
                 }
             } catch { message = "Local CLI unavailable: \(error.localizedDescription)" }
         }
@@ -468,6 +473,13 @@ final class MeetingController: ObservableObject {
         defer { deletingMeetingID = nil; deletionTask = nil }
         do { try await task.value; reload() }
         catch { reload(); throw error }
+    }
+
+    func deleteAudioFromCLI(id: String) async -> LocalControlReply {
+        do {
+            try await deleteMeetingAudio(id: id)
+            return .accepted(status: "audio-removed", runID: nil)
+        } catch { return .rejected(error.localizedDescription) }
     }
 
     func renameMeeting(id: String, title: String) async throws {
