@@ -1,19 +1,21 @@
 import AVFoundation
-import AfterwordCore
 import Foundation
 
-enum AudioImport {
+package enum AudioImport {
+    package static let supportedExtensions: Set<String> = ["webm", "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "aif", "aiff"]
+
     struct ImportError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
     }
 
-    static func importFile(at inputURL: URL, into store: MeetingStore,
+    package static func importFile(at inputURL: URL, into store: MeetingStore,
                            title requestedTitle: String? = nil, startedAt requestedStart: Date? = nil) throws -> Meeting {
         let input = inputURL.standardizedFileURL
-        let supported = Set(["webm", "wav", "mp3"])
-        guard supported.contains(input.pathExtension.lowercased()) else {
-            throw ImportError(message: "Supported audio formats are WebM, WAV, and MP3.")
+        let scoped = input.startAccessingSecurityScopedResource()
+        defer { if scoped { input.stopAccessingSecurityScopedResource() } }
+        guard supportedExtensions.contains(input.pathExtension.lowercased()) else {
+            throw ImportError(message: "Supported audio formats are WebM, WAV, MP3, M4A, AAC, FLAC, OGG, Opus, and AIFF.")
         }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: input.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
@@ -79,6 +81,6 @@ enum AudioImport {
             .first(where: FileManager.default.isExecutableFile(atPath:)) {
             return URL(fileURLWithPath: path)
         }
-        throw ImportError(message: "ffmpeg is required to import WebM, WAV, or MP3 audio.")
+        throw ImportError(message: "ffmpeg is required to import audio.")
     }
 }

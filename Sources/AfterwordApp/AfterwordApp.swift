@@ -66,6 +66,7 @@ struct MeetingWindow: View {
     @ObservedObject var calendar: CalendarController
     @State private var showingCalendarSettings = false
     @State private var deletionPrompt: DeletionPrompt?
+    @State private var isDropTargeted = false
 
     private enum DeletionPrompt {
         case confirm(Meeting), confirmAudio(Meeting), failed(String)
@@ -106,6 +107,21 @@ struct MeetingWindow: View {
             meetingBrowser
         }
         .frame(minWidth: 820, minHeight: 560)
+        .dropDestination(for: URL.self) { urls, _ in
+            controller.importAudioFiles(urls)
+        } isTargeted: { isDropTargeted = $0 }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.accentColor.opacity(0.08))
+                    .overlay {
+                        Label("Drop audio files to import", systemImage: "square.and.arrow.down")
+                            .font(.title3.bold())
+                    }
+                    .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(Color.accentColor, lineWidth: 3) }
+                    .allowsHitTesting(false)
+            }
+        }
         .alert(deletionPrompt?.title ?? "Delete meeting?", isPresented: Binding(
             get: { deletionPrompt != nil }, set: { if !$0 { deletionPrompt = nil } }), presenting: deletionPrompt) { prompt in
             switch prompt {
@@ -198,6 +214,7 @@ struct MeetingWindow: View {
                 }
                 if controller.recoveryBlocked { Button("Check Previous Job Cleanup") { controller.recheckRecovery() } }
                 else if controller.isLoading { ProgressView("Checking saved meetings…") }
+                if controller.isImportingAudio { ProgressView("Importing audio…") }
                 if processing.isBusy || processing.queuedCount > 0 || processing.isPaused { processingControls }
                 if let message = processing.message {
                     Text(message).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
@@ -216,7 +233,7 @@ struct MeetingWindow: View {
                     }
                 } else {
                     ContentUnavailableView("Record a meeting", systemImage: "waveform",
-                                           description: Text("Capture microphone and system output locally. Wear headphones to keep the two sources separate."))
+                                           description: Text("Capture microphone and system output locally, or drop an audio file here to import it."))
                 }
                 Spacer(minLength: 0)
             }

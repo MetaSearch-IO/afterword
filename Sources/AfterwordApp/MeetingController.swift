@@ -34,6 +34,7 @@ final class MeetingController: ObservableObject {
     @Published var playbackInfo: String?
     @Published var recordingLanguage = "auto"
     @Published var showingRecordingSetup = false
+    @Published private(set) var isImportingAudio = false
     @Published private(set) var deletingMeetingID: String?
     @Published private(set) var isLoading = true
     @Published private(set) var recoveryBlocked = false
@@ -53,13 +54,15 @@ final class MeetingController: ObservableObject {
     private var playbackMeetingID: String?
     private var localControl: LocalControlServer?
     private var deletionTask: Task<Void, Error>?
+    private var importTask: Task<Void, Never>?
     private var recoveryInFlight = false
     private let requestMicrophoneAccess: @MainActor () async -> Bool
     private let requestAppQuit: @MainActor () -> Void
     private let openPrivacySettings: @MainActor (URL) -> Void
+    private let shouldProcessImportedAudio: @MainActor () -> Bool
     private var pendingPrivacySettingsURL: URL?
     var onCaptureFinished: ((Meeting) -> Void)?
-    var canRecord: Bool { activity == .idle && processing.canReserveRecording && !isLoading && !quitting && deletingMeetingID == nil }
+    var canRecord: Bool { activity == .idle && processing.canReserveRecording && !isLoading && !isImportingAudio && !quitting && deletingMeetingID == nil }
     func canProcess(_ meeting: Meeting, summaryOnly: Bool = false) -> Bool {
         activity == .idle && !isLoading && !quitting && deletingMeetingID != meeting.id
             && processing.canProcess(meeting, summaryOnly: summaryOnly)
@@ -72,7 +75,8 @@ final class MeetingController: ObservableObject {
              if status == .notDetermined { return await AVCaptureDevice.requestAccess(for: .audio) }
              return status == .authorized
          }, requestAppQuit: @escaping @MainActor () -> Void = { NSApp.terminate(nil) },
-         openPrivacySettings: @escaping @MainActor (URL) -> Void = { _ = NSWorkspace.shared.open($0) }) {
+         openPrivacySettings: @escaping @MainActor (URL) -> Void = { _ = NSWorkspace.shared.open($0) },
+         shouldProcessImportedAudio: @escaping @MainActor () -> Bool = { RemoteProcessing.enabled }) {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         store = MeetingStore(rootURL: rootURL ?? support.appendingPathComponent("Afterword/meetings", isDirectory: true))
         processing = ProcessingController(store: store, runtimeURL: runtimeURL)
@@ -80,6 +84,7 @@ final class MeetingController: ObservableObject {
         self.requestMicrophoneAccess = requestMicrophoneAccess
         self.requestAppQuit = requestAppQuit
         self.openPrivacySettings = openPrivacySettings
+        self.shouldProcessImportedAudio = shouldProcessImportedAudio
         playback = EvidencePlayback { [weak self] error in
             self?.playbackInfo = nil
             self?.playbackMeetingID = nil
@@ -253,6 +258,54 @@ final class MeetingController: ObservableObject {
         } catch { message = error.localizedDescription }
     }
 
+    func importAudioFiles(_ urls: [URL]) -> Bool {
+        guard !urls.isEmpty else { return false }
+        guard activity == .idle, !isLoading, !isImportingAudio, !quitting, deletingMeetingID == nil else {
+            message = "Finish the current recording or import before dropping audio."
+            return false
+        }
+        guard urls.allSatisfy({ $0.isFileURL && AudioImport.supportedExtensions.contains($0.pathExtension.lowercased()) }) else {
+            message = "Drop a supported audio file (WebM, WAV, MP3, M4A, AAC, FLAC, OGG, Opus, or AIFF)."
+            return false
+        }
+        isImportingAudio = true
+        message = "Importing \(urls.count) audio file\(urls.count == 1 ? "" : "s")…"
+        let root = store.rootURL
+        importTask = Task {
+            var imported: [Meeting] = []
+            var errors: [String] = []
+            for url in urls {
+                message = "Importing \(url.lastPathComponent)…"
+                do {
+                    let meeting = try await Task.detached(priority: .utility) {
+                        try AudioImport.importFile(at: url, into: MeetingStore(rootURL: root))
+                    }.value
+                    imported.append(meeting)
+                } catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
+            }
+            reload()
+            if let last = imported.last { selectedID = last.id }
+            isImportingAudio = false
+            importTask = nil
+            let remote = shouldProcessImportedAudio()
+            var queued = 0
+            if remote && !quitting {
+                for meeting in imported where canProcess(meeting) {
+                    processing.start(meeting)
+                    queued += 1
+                }
+            }
+            if errors.isEmpty {
+                message = remote
+                    ? "Imported \(imported.count) audio file(s). \(queued) queued for Hyperion processing."
+                    : "Imported \(imported.count) audio file(s). Hyperion is off; enable it in Settings before processing remotely."
+            } else {
+                message = "Imported \(imported.count) audio file(s). Failed: \(errors.joined(separator: "; "))"
+            }
+        }
+        return true
+    }
+
     func record() {
         guard canRecord else { return }
         let language = recordingLanguage
@@ -398,6 +451,7 @@ final class MeetingController: ObservableObject {
         quitting = true
         processing.beginShutdown()
         _ = try? await deletionTask?.value
+        await importTask?.value
         await transition?.value
         if engine != nil { await finish() }
         let ready = await processing.prepareToQuit()
