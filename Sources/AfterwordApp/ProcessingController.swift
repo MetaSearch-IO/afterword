@@ -145,6 +145,7 @@ final class ProcessingController: ObservableObject {
     private var remoteCleanupUnconfirmed = false
     private var validationError: String?
     private var cleanupProbe: WorkerProcess?
+    private var cleanupRetryTask: Task<Void, Never>?
     private var queue: [Request] = []
     private var remoteRetryTask: Task<Void, Never>?
     private var remoteRetryAttempt = 0
@@ -659,10 +660,13 @@ final class ProcessingController: ObservableObject {
     }
 
     func recheckCleanup() {
-        guard blocked, cleanupProbe?.cleanupConfirmed() == true else {
+        guard blocked else { return }
+        guard cleanupProbe?.cleanupConfirmed() == true else {
             message = "Owned process cleanup is still unconfirmed. Try checking again after the processes finish."
             return
         }
+        cleanupRetryTask?.cancel()
+        cleanupRetryTask = nil
         cleanupProbe = nil
         blocked = false
         if let deferred = deferredAfterCleanup {
@@ -676,6 +680,18 @@ final class ProcessingController: ObservableObject {
     private func finishActivity() {
         clockTask?.cancel()
         clockTask = nil
+        if blocked && cleanupRetryTask == nil {
+            cleanupRetryTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    guard let self else { return }
+                    if self.cleanupProbe?.cleanupConfirmed() == true {
+                        self.recheckCleanup()
+                        return
+                    }
+                }
+            }
+        }
         if !blocked {
             isBusy = false; isCancelling = false; setStage(nil); meetingID = nil; runID = nil
             processingRemotely = false

@@ -533,6 +533,27 @@ final class ProcessingQueueTests: XCTestCase {
     }
 
     @MainActor
+    func testPausedJobAutomaticallyConfirmsDelayedChildExit() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Delayed pause cleanup", leak: true)
+        let processor = local(fixture)
+        processor.start(meeting)
+        try await waitFor { try fixture.calls("waiting").count == 1 }
+        let child = try fixture.child(meeting)
+        defer { kill(child, SIGKILL) }
+        processor.pause()
+        try await waitFor { processor.cleanupBlocked }
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "paused")
+        kill(child, SIGTERM)
+        try await waitFor { kill(-child, 0) == -1 && errno == ESRCH }
+        try await waitFor({ !processor.cleanupBlocked }, timeout: 5)
+        XCTAssertFalse(processor.isBusy)
+        XCTAssertTrue(processor.isPaused)
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingStatus, "paused")
+    }
+
+    @MainActor
     func testCancellationRecoversAtomicPublicationBeforeReplacingPendingIdentity() async throws {
         for publish in ["complete-race", "final-race"] {
             let fixture = try Fixture()
