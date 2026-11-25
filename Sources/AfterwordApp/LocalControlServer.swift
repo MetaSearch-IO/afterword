@@ -121,7 +121,7 @@ final class LocalControlServer: @unchecked Sendable {
         let reply: LocalControlReply
         if let request = try? JSONSerialization.jsonObject(with: input) as? [String: String],
            let command = request["command"],
-           ["record", "stop"].contains(command) || (["process", "notes", "label", "reload", "delete-audio"].contains(command) && request["meeting_id"] != nil) {
+           ["record", "stop"].contains(command) || (["process", "notes", "label", "reload", "delete-audio", "retarget-remote"].contains(command) && request["meeting_id"] != nil) {
             reply = await process(request)
         } else {
             reply = .rejected("Unsupported local command.")

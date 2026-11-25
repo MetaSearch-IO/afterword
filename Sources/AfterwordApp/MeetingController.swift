@@ -146,6 +146,15 @@ final class MeetingController: ObservableObject {
             return .accepted(status: "loaded", runID: nil)
         }
         guard let id = request["meeting_id"] else { return .rejected("A meeting ID is required.") }
+        if command == "retarget-remote" {
+            guard activity == .idle, !isLoading, !quitting, deletingMeetingID == nil else {
+                return .rejected("Wait for recording and recovery to finish before changing processing destination.")
+            }
+            do {
+                let run = try processing.retargetPausedToRemote(meetingID: id)
+                return .accepted(status: "paused", runID: run)
+            } catch { return .rejected(error.localizedDescription) }
+        }
         if command == "label" {
             guard let segment = request["segment_id"], let speaker = request["speaker_id"] else {
                 return .rejected("A segment and speaker are required.")

@@ -49,7 +49,7 @@ private struct CommandReply: Codable {
 
 @main
 private enum AfterwordCLI {
-    private static let usage = "Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest] | trim ID START_SECONDS END_SECONDS | import FILE | storage [--json] | delete-audio ID --yes [--erase-untranscribed]"
+    private static let usage = "Usage: afterwordctl list [--json] | status [ID|latest] [--json] | record | stop | process [ID|latest] | notes [ID|latest] | label ID SEGMENT_ID SPEAKER_ID | watch [ID|latest] | trim ID START_SECONDS END_SECONDS | import FILE | storage [--json] | delete-audio ID --yes [--erase-untranscribed] | retarget-remote ID"
 
     static func main() {
         do { try run(Array(CommandLine.arguments.dropFirst())) }
@@ -82,7 +82,7 @@ private enum AfterwordCLI {
             print(usage)
             return
         }
-        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch", "trim", "import", "storage", "delete-audio"].contains(command) else {
+        guard ["list", "status", "record", "stop", "process", "notes", "label", "watch", "trim", "import", "storage", "delete-audio", "retarget-remote"].contains(command) else {
             throw CommandError(message: "Unknown command: \(command). Run afterwordctl --help.")
         }
         let json = arguments.contains("--json")
@@ -105,6 +105,8 @@ private enum AfterwordCLI {
             }
         } else if command == "storage" {
             guard operands.isEmpty else { throw CommandError(message: "Usage: afterwordctl storage [--json]") }
+        } else if command == "retarget-remote" {
+            guard operands.count == 1 else { throw CommandError(message: "Usage: afterwordctl retarget-remote ID") }
         } else {
             guard operands.count <= (["list", "record", "stop"].contains(command) ? 0 : 1) else {
                 throw CommandError(message: "Too many arguments for \(command).")
@@ -158,6 +160,29 @@ private enum AfterwordCLI {
             let after = try store.load(id: id)
             guard after.audioRemovedAt != nil else { throw CommandError(message: "Audio removal was not confirmed.") }
             if json { try printJSON(reply) } else { print("audio-removed  \(id)") }
+            return
+        }
+        if command == "retarget-remote" {
+            guard ProcessInfo.processInfo.environment["AFTERWORD_MEETINGS_ROOT"] == nil,
+                  ProcessInfo.processInfo.environment["AFTERWORD_CONTROL_SOCKET"] == nil else {
+                throw CommandError(message: "Changing processing destination requires the installed Afterword app and library.")
+            }
+            let id = operands[operands.startIndex]
+            let before = try store.load(id: id)
+            guard before.processingStatus == "paused" else { throw CommandError(message: "The meeting is not paused.") }
+            let reply: CommandReply
+            do { reply = try requestProcessing(id: id, command: command) }
+            catch {
+                let saved = try store.load(id: id)
+                guard saved.processingStatus == "paused", try remoteRequest(saved) else { throw error }
+                reply = CommandReply(ok: true, status: "paused", runID: saved.processingRunID, error: nil)
+            }
+            guard reply.ok else { throw CommandError(message: reply.error ?? "Afterword rejected the destination change.") }
+            let saved = try store.load(id: id)
+            guard saved.processingStatus == "paused", try remoteRequest(saved) else {
+                throw CommandError(message: "The paused Hyperion request was not confirmed.")
+            }
+            if json { try printJSON(reply) } else { print("paused on Hyperion  \(saved.processingRunID ?? "")") }
             return
         }
         if command == "storage" {
@@ -240,6 +265,13 @@ private enum AfterwordCLI {
         print("processing: \(status.processingStatus)\(status.processingStage.map { " / \($0)" } ?? "")")
         if let error = status.processingError { print("error: \(error)") }
         print("transcript: \(status.hasTranscript ? "ready" : "none")  notes: \(status.hasNotes ? "ready" : "none")")
+    }
+
+    private static func remoteRequest(_ meeting: Meeting) throws -> Bool {
+        guard let run = meeting.processingRunID else { return false }
+        let path = try store.artifactURL(meetingID: meeting.id, relativePath: "work/\(run)/request.json")
+        let value = try JSONSerialization.jsonObject(with: Data(contentsOf: path)) as? [String: Any]
+        return value?["remote"] as? Bool == true
     }
 
     private static func notifyAppOfNewMeeting(id: String) {

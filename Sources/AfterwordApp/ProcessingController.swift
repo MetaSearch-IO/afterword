@@ -549,6 +549,25 @@ final class ProcessingController: ObservableObject {
         changed?()
     }
 
+    func retargetPausedToRemote(meetingID: String) throws -> String {
+        guard isPaused, !isBusy, !blocked, !shuttingDown, !recordingReserved,
+              let index = queue.firstIndex(where: { $0.meetingID == meetingID }) else {
+            throw CaptureFailure(message: "This meeting must be safely paused before changing its processing destination.")
+        }
+        let previous = queue[index]
+        let meeting = try currentMeeting(previous, allowPublished: true)
+        guard meeting.processingStatus == "paused", meeting.activeRevisionID == previous.baseRevision else {
+            throw CaptureFailure(message: "This paused request has changed; review its saved results before starting a new run.")
+        }
+        guard remoteEnabled() else { throw CaptureFailure(message: "Enable Hyperion processing in Settings first.") }
+        if previous.remote == true { return previous.run }
+        let replacement = try makeRequest(meeting, summaryOnly: previous.summaryOnly, remote: true)
+        queue[index] = replacement
+        queuedCount = queue.count
+        changed?()
+        return replacement.run
+    }
+
     func reserveRecording() async -> Bool {
         guard canReserveRecording else { return false }
         recordingReserved = true

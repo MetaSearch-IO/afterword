@@ -170,6 +170,33 @@ final class ProcessingQueueTests: XCTestCase {
     }
 
     @MainActor
+    func testPausedLocalRequestCanBeRetargetedToHyperionWithoutStarting() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let meeting = try fixture.meeting("Retarget")
+        var remoteEnabled = false
+        let processor = ProcessingController(store: fixture.store, runtimeURL: fixture.runtime,
+                                             remoteEnabled: { remoteEnabled })
+        processor.pause()
+        processor.start(meeting)
+        let original = try fixture.store.load(id: meeting.id)
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: original)?.remote, false)
+        XCTAssertThrowsError(try processor.retargetPausedToRemote(meetingID: meeting.id))
+        XCTAssertEqual(try fixture.store.load(id: meeting.id).processingRunID, original.processingRunID)
+        remoteEnabled = true
+        let replacement = try processor.retargetPausedToRemote(meetingID: meeting.id)
+        let saved = try fixture.store.load(id: meeting.id)
+        XCTAssertNotEqual(replacement, original.processingRunID)
+        XCTAssertEqual(saved.processingRunID, replacement)
+        XCTAssertEqual(saved.processingStatus, "paused")
+        XCTAssertEqual(try ProcessingRequest.load(store: fixture.store, meeting: saved)?.remote, true)
+        XCTAssertEqual(try processor.retargetPausedToRemote(meetingID: meeting.id), replacement)
+        XCTAssertTrue(processor.isPaused)
+        XCTAssertFalse(processor.isBusy)
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
+    @MainActor
     func testOlderQueuedRequestWithoutDestinationStaysLocalAfterRestore() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }

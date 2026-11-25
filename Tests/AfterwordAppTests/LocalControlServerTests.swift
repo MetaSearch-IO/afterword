@@ -57,6 +57,9 @@ final class LocalControlServerTests: XCTestCase {
         let reload = try await Task.detached { try sendLocalCommand(socket: socket, command: "reload") }.value
         let reloadReply = try XCTUnwrap(JSONSerialization.jsonObject(with: reload) as? [String: Any])
         XCTAssertEqual(reloadReply["run_id"] as? String, "reload:test-id")
+        let retarget = try await Task.detached { try sendLocalCommand(socket: socket, command: "retarget-remote") }.value
+        let retargetReply = try XCTUnwrap(JSONSerialization.jsonObject(with: retarget) as? [String: Any])
+        XCTAssertEqual(retargetReply["run_id"] as? String, "retarget-remote:test-id")
         let removal = try await Task.detached { try sendLocalCommand(socket: socket, command: "delete-audio") }.value
         let removalReply = try XCTUnwrap(JSONSerialization.jsonObject(with: removal) as? [String: Any])
         XCTAssertEqual(removalReply["run_id"] as? String, "delete-audio:test-id")
